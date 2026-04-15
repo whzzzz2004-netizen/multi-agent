@@ -30,6 +30,12 @@ from rdagent.app.qlib_rd_loop.factor import main as fin_factor
 from rdagent.app.qlib_rd_loop.factor_from_report import main as fin_factor_report
 from rdagent.app.qlib_rd_loop.model import main as fin_model
 from rdagent.app.qlib_rd_loop.quant import main as fin_quant
+from rdagent.app.qlib_rd_loop.research import backtest_model_library as fin_backtest_model_library
+from rdagent.app.qlib_rd_loop.research import list_model_library as fin_list_model_library
+from rdagent.app.qlib_rd_loop.research import main as fin_research
+from rdagent.app.qlib_rd_loop.research import lgbm_from_pool as fin_lgbm_from_pool
+from rdagent.app.qlib_rd_loop.research import mine_factors as fin_mine_factors
+from rdagent.app.qlib_rd_loop.research import model_from_pool as fin_model_from_pool
 from rdagent.app.utils.health_check import health_check
 from rdagent.app.utils.info import collect_info
 from rdagent.log.mle_summary import grade_summary as grade_summary
@@ -110,6 +116,132 @@ def fin_quant_cli(
     checkout: CheckoutOption = True,
 ):
     fin_quant(path=path, step_n=step_n, loop_n=loop_n, all_duration=all_duration, checkout=checkout)
+
+
+@app.command(name="fin_research")
+def fin_research_cli(
+    mode: str = "mine_factors",
+    path: Optional[str] = None,
+    step_n: Optional[int] = None,
+    loop_n: Optional[int] = None,
+    all_duration: Optional[str] = None,
+    checkout: CheckoutOption = True,
+    base_features_path: Optional[str] = None,
+    factor_pool_path: Optional[str] = None,
+    factor_top_k: Optional[int] = None,
+    model_name: Optional[str] = None,
+    model_library_path: Optional[str] = None,
+    report_file_path: Optional[str] = None,
+    auto_rounds: int = 10,
+    min_cost_ir: float = 0.0,
+    batch_size: int = 10,
+):
+    fin_research(
+        mode=mode,
+        path=path,
+        step_n=step_n,
+        loop_n=loop_n,
+        all_duration=all_duration,
+        checkout=checkout,
+        base_features_path=base_features_path,
+        factor_pool_path=factor_pool_path,
+        factor_top_k=factor_top_k,
+        model_name=model_name,
+        model_library_path=model_library_path,
+        report_file_path=report_file_path,
+        auto_rounds=auto_rounds,
+        min_cost_ir=min_cost_ir,
+        batch_size=batch_size,
+    )
+
+
+@app.command(name="fin_mine_factors")
+def fin_mine_factors_cli(
+    path: Optional[str] = None,
+    step_n: Optional[int] = None,
+    loop_n: Optional[int] = None,
+    all_duration: Optional[str] = None,
+    checkout: CheckoutOption = True,
+    base_features_path: Optional[str] = None,
+    batch_size: int = 10,
+):
+    fin_mine_factors(
+        path=path,
+        step_n=step_n,
+        loop_n=loop_n,
+        all_duration=all_duration,
+        checkout=checkout,
+        base_features_path=base_features_path,
+        batch_size=batch_size,
+    )
+
+
+@app.command(name="fin_model_from_pool")
+def fin_model_from_pool_cli(
+    step_n: Optional[int] = None,
+    loop_n: Optional[int] = None,
+    all_duration: Optional[str] = None,
+    factor_pool_path: Optional[str] = None,
+    factor_top_k: Optional[int] = None,
+):
+    fin_model_from_pool(
+        step_n=step_n,
+        loop_n=loop_n,
+        all_duration=all_duration,
+        factor_pool_path=factor_pool_path,
+        factor_top_k=factor_top_k,
+    )
+
+
+@app.command(name="fin_lgbm_from_pool")
+def fin_lgbm_from_pool_cli(
+    factor_pool_path: Optional[str] = None,
+    factor_top_k: Optional[int] = None,
+):
+    fin_lgbm_from_pool(
+        factor_pool_path=factor_pool_path,
+        factor_top_k=factor_top_k,
+    )
+
+
+@app.command(name="fin_backtest_model_library")
+def fin_backtest_model_library_cli(
+    model_name: Optional[str] = None,
+    factor_pool_path: Optional[str] = None,
+    factor_top_k: Optional[int] = None,
+    model_library_path: Optional[str] = None,
+    auto_rounds: int = 10,
+    min_cost_ir: float = 0.0,
+    llm_decision: bool = True,
+):
+    fin_backtest_model_library(
+        model_name=model_name,
+        factor_pool_path=factor_pool_path,
+        factor_top_k=factor_top_k,
+        model_library_path=model_library_path,
+        auto_rounds=auto_rounds,
+        min_cost_ir=min_cost_ir,
+        llm_decision=llm_decision,
+    )
+
+
+@app.command(name="fin_import_models_from_report")
+def fin_import_models_from_report_cli(
+    report_file_path: str,
+    model_library_path: Optional[str] = None,
+):
+    fin_research(
+        mode="paper_to_model_library",
+        report_file_path=report_file_path,
+        model_library_path=model_library_path,
+    )
+
+
+@app.command(name="fin_list_model_library")
+def fin_list_model_library_cli(
+    model_library_path: Optional[str] = None,
+):
+    fin_list_model_library(model_library_path=model_library_path)
 
 
 @app.command(name="fin_factor_report")

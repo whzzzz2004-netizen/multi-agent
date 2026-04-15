@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import os
 import subprocess
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Tuple, Union
 
@@ -86,6 +89,7 @@ class FactorFBWorkspace(FBWorkspace):
     FB_EXECUTION_SUCCEEDED = "Execution succeeded without error."
     FB_OUTPUT_FILE_NOT_FOUND = "\nExpected output file not found."
     FB_OUTPUT_FILE_FOUND = "\nExpected output file found."
+    EXPORTED_PARQUET_DIR = Path.cwd() / "git_ignore_folder" / "factor_outputs"
 
     def __init__(
         self,
@@ -102,6 +106,72 @@ class FactorFBWorkspace(FBWorkspace):
             if ("factor.py" in self.file_dict and not self.raise_exception)
             else None
         )
+
+    @staticmethod
+    def _sanitize_factor_name(name: str) -> str:
+        return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in name).strip("_") or "factor"
+
+    @staticmethod
+    def _hash_factor_dataframe(df: pd.DataFrame) -> str:
+        hashed = pd.util.hash_pandas_object(df, index=True).values
+        return hashlib.md5(hashed.tobytes()).hexdigest()
+
+    @staticmethod
+    def _env_flag(name: str, default: bool = False) -> bool:
+        value = os.environ.get(name)
+        if value is None:
+            return default
+        return value.strip().lower() in {"1", "true", "yes", "y", "on"}
+
+    def _update_factor_manifest(self, factor_name: str, latest_path: Path, df: pd.DataFrame, factor_hash: str) -> None:
+        manifest_path = self.EXPORTED_PARQUET_DIR / "manifest.csv"
+        row = pd.DataFrame(
+            [
+                {
+                    "factor_name": factor_name,
+                    "hash": factor_hash,
+                    "rows": len(df),
+                    "non_null": int(df.iloc[:, 0].notna().sum()),
+                    "latest_path": str(latest_path),
+                    "workspace_path": str(self.workspace_path),
+                    "updated_at": datetime.now().isoformat(timespec="seconds"),
+                }
+            ]
+        )
+        if manifest_path.exists():
+            manifest = pd.read_csv(manifest_path)
+            manifest = manifest[manifest["factor_name"] != factor_name]
+            manifest = pd.concat([manifest, row], ignore_index=True)
+        else:
+            manifest = row
+        manifest.sort_values("factor_name").to_csv(manifest_path, index=False)
+
+    def _export_factor_dataframe(self, df: pd.DataFrame) -> None:
+        if df is None or df.empty:
+            return
+
+        self.EXPORTED_PARQUET_DIR.mkdir(parents=True, exist_ok=True)
+        factor_name = self._sanitize_factor_name(str(df.columns[0]))
+        latest_path = self.EXPORTED_PARQUET_DIR / f"{factor_name}.parquet"
+        current_hash = self._hash_factor_dataframe(df)
+
+        if latest_path.exists():
+            try:
+                existing_df = pd.read_parquet(latest_path)
+                if self._hash_factor_dataframe(existing_df) == current_hash:
+                    self._update_factor_manifest(factor_name, latest_path, df, current_hash)
+                    return
+            except Exception:
+                # If the previous parquet cannot be read, overwrite it with the current successful output.
+                pass
+
+        df.to_parquet(latest_path, engine="pyarrow")
+        self._update_factor_manifest(factor_name, latest_path, df, current_hash)
+
+        if self._env_flag("FACTOR_EXPORT_KEEP_SNAPSHOTS"):
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            snapshot_path = self.EXPORTED_PARQUET_DIR / f"{timestamp}__{factor_name}.parquet"
+            df.to_parquet(snapshot_path, engine="pyarrow")
 
     @cache_with_pickle(hash_func)
     def execute(self, data_type: str = "Debug") -> Tuple[str, pd.DataFrame]:
@@ -195,6 +265,7 @@ class FactorFBWorkspace(FBWorkspace):
             if workspace_output_file_path.exists() and execution_success:
                 try:
                     executed_factor_value_dataframe = pd.read_hdf(workspace_output_file_path)
+                    self._export_factor_dataframe(executed_factor_value_dataframe)
                     execution_feedback += self.FB_OUTPUT_FILE_FOUND
                 except Exception as e:
                     execution_feedback += f"Error found when reading hdf file: {e}"[:1000]

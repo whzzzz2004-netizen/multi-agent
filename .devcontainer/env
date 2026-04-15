@@ -1,25 +1,30 @@
-# Global configs:
-
 MAX_RETRY=12000
 RETRY_WAIT_SECONDS=5
 TIMEOUT_FAIL_LIMIT=100
 
 # litellm
-# CHAT_MODEL=gpt-4o
-# CHAT_TEMPERATURE=0.7
-
 CHAT_STREAM=False
 CHAT_TEMPERATURE=1
-CHAT_MODEL=o1-preview
+CHAT_MODEL=deepseek-chat
 SYSTEM_PROMPT_ROLE=user
 
 BACKEND=rdagent.oai.backend.LiteLLMAPIBackend
-OPENAI_API_KEY=sk-1234
-OPENAI_API_BASE=http://ep14.213428.xyz:38881
 
+# ============================================================
+# Chat 模型配置（DeepSeek）
+# ============================================================
+OPENAI_API_KEY="sk-117007e8901e4a22b5d33bc29c5b180b"
+OPENAI_BASE_URL="https://api.deepseek.com/v1"
 
-# amc chat model configs:
-EMBEDDING_MODEL=text-embedding-ada-002
+# ============================================================
+# Embedding 模型配置（硅基流动 - BAAI/bge-m3）
+# ============================================================
+EMBEDDING_MODEL="BAAI/bge-m3"
+EMBEDDING_API_KEY="sk-igehrozplvqrbspfxppexyknfkzuwvvgfdkiszemmkpnghvi"
+EMBEDDING_API_BASE="https://api.siliconflow.cn/v1"
+
+# 如果上面的 EMBEDDING_API_BASE 不生效，可以尝试用这个环境变量
+# SILICONFLOW_API_KEY="sk-igehrozplvqrbspfxppexyknfkzuwvvgfdkiszemmkpnghvi"
 
 # Cache Setting (Optional):
 DUMP_CHAT_CACHE=True
@@ -29,9 +34,7 @@ USE_EMBEDDING_CACHE=False
 LOG_LLM_CHAT_CONTENT=True
 
 DS_LOCAL_DATA_PATH=/tmp/kaggle
-
 DS_IF_USING_MLE_DATA=True
-
 
 PICKLE_CACHE_FOLDER_PATH_STR=./log/pickle_cache
 CACHE_WITH_PICKLE=False
@@ -39,9 +42,5 @@ ENABLE_CACHE=False
 PROMPT_CACHE_PATH=./log/prompt_cache.db
 
 DS_CODER_COSTEER_ENV_TYPE=conda
-# DS_PROPOSAL_VERSION=v2 deprecated
-
 DS_CODER_ON_WHOLE_PIPELINE=True
 COSTEER_V2_QUERY_FORMER_TRACE_LIMIT=3
-
-# export PYTHONPATH=.  # this is for running researcher branch;

@@ -1,7 +1,11 @@
 import copyreg
+import json
+import socket
+import traceback
 from typing import Any, Literal, Optional, Type, TypedDict, Union, cast
 
 import numpy as np
+import requests
 from litellm import (
     completion,
     completion_cost,
@@ -73,18 +77,121 @@ class LiteLLMAPIBackend(APIBackend):
         Call the embedding function
         """
         model_name = LITELLM_SETTINGS.embedding_model
+        api_base = LITELLM_SETTINGS.embedding_openai_base_url or LITELLM_SETTINGS.openai_api_base or None
+        api_key = LITELLM_SETTINGS.embedding_openai_api_key or LITELLM_SETTINGS.openai_api_key or None
         logger.info(f"{LogColors.GREEN}Using emb model{LogColors.END} {model_name}", tag="debug_litellm_emb")
         if LITELLM_SETTINGS.log_llm_chat_content:
             logger.info(
                 f"{LogColors.MAGENTA}Creating embedding{LogColors.END} for: {input_content_list}",
                 tag="debug_litellm_emb",
             )
+        if api_base and "dashscope.aliyuncs.com" in api_base and model_name.startswith("openai/"):
+            return self._create_dashscope_embedding(input_content_list, model_name, api_base, api_key)
+
         response = embedding(
             model=model_name,
             input=input_content_list,
+            # DashScope's OpenAI-compatible embedding endpoint rejects the
+            # implicit/default encoding format from the OpenAI SDK path.
+            encoding_format="float",
+            api_base=api_base,
+            api_key=api_key,
         )
         response_list = [data["embedding"] for data in response.data]
         return response_list
+
+    @staticmethod
+    def _trim_dashscope_embedding_inputs(input_content_list: list[str], max_chars: int) -> list[str]:
+        trimmed = []
+        for content in input_content_list:
+            if len(content) > max_chars:
+                logger.warning(
+                    f"DashScope embedding input is too long ({len(content)} chars); truncating to {max_chars} chars."
+                )
+                trimmed.append(content[:max_chars])
+            else:
+                trimmed.append(content)
+        return trimmed
+
+    @staticmethod
+    def _create_dashscope_embedding(
+        input_content_list: list[str],
+        model_name: str,
+        api_base: str,
+        api_key: str | None,
+    ) -> list[list[float]]:
+        if not api_key:
+            raise ValueError("DashScope embedding requires an API key.")
+        if not api_key.isascii():
+            non_ascii_positions = [idx for idx, char in enumerate(api_key) if ord(char) > 127][:5]
+            raise ValueError(
+                "DashScope embedding API key contains non-ASCII characters. "
+                f"Please replace placeholder text with a real key. non_ascii_positions={non_ascii_positions}"
+            )
+
+        host = api_base.split("//", 1)[-1].split("/", 1)[0]
+        try:
+            socket.getaddrinfo(host, 443)
+        except OSError as exc:
+            raise RuntimeError(f"DashScope DNS resolution failed for {host}: {exc}") from exc
+
+        endpoint = api_base.rstrip("/") + "/embeddings"
+        model = model_name.split("/", 1)[1]
+        max_chars = min(LITELLM_SETTINGS.embedding_max_length, 4096)
+        request_input_content_list = LiteLLMAPIBackend._trim_dashscope_embedding_inputs(
+            input_content_list,
+            max_chars=max_chars,
+        )
+        session = requests.Session()
+        session.trust_env = False
+
+        def post_embedding(contents: list[str]) -> requests.Response:
+            payload = {
+                "model": model,
+                "input": contents,
+                "encoding_format": "float",
+            }
+            try:
+                return session.post(
+                    endpoint,
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json",
+                    },
+                    json=payload,
+                    timeout=60,
+                )
+            except UnicodeEncodeError as exc:
+                raise RuntimeError(
+                    "DashScope request failed while encoding HTTP headers. "
+                    f"api_key_ascii={api_key.isascii()}, api_key_prefix={api_key[:6]!r}, "
+                    f"traceback={traceback.format_exc(limit=3)}"
+                ) from exc
+
+        response = post_embedding(request_input_content_list)
+        if response.status_code == 400:
+            logger.warning(
+                "DashScope embedding returned 400; retrying once with 2048-char truncated inputs. "
+                f"response={response.text[:500]}"
+            )
+            request_input_content_list = LiteLLMAPIBackend._trim_dashscope_embedding_inputs(
+                input_content_list,
+                max_chars=2048,
+            )
+            response = post_embedding(request_input_content_list)
+        if response.status_code == 400:
+            logger.warning(
+                "DashScope embedding still returned 400; retrying once with 512-char truncated inputs. "
+                f"response={response.text[:500]}"
+            )
+            request_input_content_list = LiteLLMAPIBackend._trim_dashscope_embedding_inputs(
+                input_content_list,
+                max_chars=512,
+            )
+            response = post_embedding(request_input_content_list)
+        response.raise_for_status()
+        body = response.json()
+        return [data["embedding"] for data in body["data"]]
 
     class CompleteKwargs(TypedDict):
         model: str

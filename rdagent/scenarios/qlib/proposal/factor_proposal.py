@@ -1,4 +1,6 @@
 import json
+import re
+from pathlib import Path
 from typing import List, Tuple
 
 from rdagent.components.coder.factor_coder.factor import FactorExperiment, FactorTask
@@ -10,6 +12,40 @@ from rdagent.scenarios.qlib.experiment.quant_experiment import QlibQuantScenario
 from rdagent.utils.agent.tpl import T
 
 QlibFactorHypothesis = Hypothesis
+
+FACTOR_OUTPUT_DIR = Path.cwd() / "git_ignore_folder" / "factor_outputs"
+
+
+def _strip_snapshot_prefix(name: str) -> str:
+    return re.sub(r"^\d{8}_\d{6}__", "", name)
+
+
+def _normalize_factor_name_for_dedup(name: str) -> str:
+    normalized = _strip_snapshot_prefix(name).lower()
+    normalized = normalized.replace("momentum", "mom").replace("reversal", "rev")
+    normalized = normalized.replace("volume", "vol").replace("day", "d")
+    normalized = re.sub(r"[^a-z0-9]+", "", normalized)
+
+    match = re.search(r"(mom|rev)(\d+)d?", normalized)
+    if match:
+        return f"{match.group(1)}{match.group(2)}d"
+
+    match = re.search(r"(\d+)d?(mom|rev)", normalized)
+    if match:
+        return f"{match.group(2)}{match.group(1)}d"
+
+    return normalized
+
+
+def _exported_factor_names(limit: int = 80) -> list[str]:
+    if not FACTOR_OUTPUT_DIR.exists():
+        return []
+    names = {
+        _strip_snapshot_prefix(path.stem)
+        for path in FACTOR_OUTPUT_DIR.glob("*.parquet")
+        if not path.stem.startswith(".")
+    }
+    return sorted(names)[:limit]
 
 
 class QlibFactorHypothesisGen(FactorHypothesisGen):
@@ -32,6 +68,15 @@ class QlibFactorHypothesisGen(FactorHypothesisGen):
             else "No previous hypothesis and feedback available since it's the first round."
         )
 
+        exported_names = _exported_factor_names()
+        existing_factor_hint = (
+            "\nAlready exported factor names: "
+            + ", ".join(exported_names)
+            + ". Do not propose the same factor again, including renamed aliases such as MOM_10D vs Momentum_10D."
+            if exported_names
+            else ""
+        )
+
         context_dict = {
             "hypothesis_and_feedback": hypothesis_and_feedback,
             "last_hypothesis_and_feedback": last_hypothesis_and_feedback,
@@ -39,7 +84,8 @@ class QlibFactorHypothesisGen(FactorHypothesisGen):
                 "Try the easiest and fastest factors to experiment with from various perspectives first."
                 if len(trace.hist) < 15
                 else "Now, you need to try factors that can achieve high IC (e.g., machine learning-based factors)."
-            ),
+            )
+            + existing_factor_hint,
             "hypothesis_output_format": T("scenarios.qlib.prompts:factor_hypothesis_output_format").r(),
             "hypothesis_specification": T("scenarios.qlib.prompts:factor_hypothesis_specification").r(),
         }
@@ -82,13 +128,22 @@ class QlibFactorHypothesis2Experiment(FactorHypothesis2Experiment):
             else:
                 hypothesis_and_feedback = "No previous hypothesis and feedback available."
 
+        exported_names = _exported_factor_names()
+        duplicate_guard = (
+            "Existing exported factor names that must not be recreated: "
+            + ", ".join(exported_names)
+            + ". Treat renamed aliases as duplicates; for example, MOM_10D, Momentum_10D, and 10_day_momentum are the same direction."
+            if exported_names
+            else None
+        )
+
         return {
             "target_hypothesis": str(hypothesis),
             "scenario": scenario,
             "hypothesis_and_feedback": hypothesis_and_feedback,
             "experiment_output_format": experiment_output_format,
-            "target_list": [],
-            "RAG": None,
+            "target_list": exported_names,
+            "RAG": duplicate_guard,
         }, True
 
     def convert_response(self, response: str, hypothesis: Hypothesis, trace: Trace) -> FactorExperiment:
@@ -114,8 +169,11 @@ class QlibFactorHypothesis2Experiment(FactorHypothesis2Experiment):
         ]
 
         unique_tasks = []
+        known_factor_keys = {_normalize_factor_name_for_dedup(name) for name in _exported_factor_names()}
         for task in tasks:
             duplicate = False
+            if _normalize_factor_name_for_dedup(task.factor_name) in known_factor_keys:
+                duplicate = True
             for based_exp in exp.based_experiments:
                 if isinstance(based_exp, QlibModelExperiment):
                     continue

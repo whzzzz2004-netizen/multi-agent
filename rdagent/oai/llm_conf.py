@@ -3,7 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Literal
 
-from pydantic import Field
+from pydantic import AliasChoices, Field
 
 from rdagent.core.conf import ExtendedBaseSettings
 
@@ -61,7 +61,7 @@ class LLMSettings(ExtendedBaseSettings):
 
     # Chat configs
     openai_api_key: str = ""  # TODO: simplify the key design.
-    openai_api_base: str = ""
+    openai_api_base: str = Field(default="", validation_alias=AliasChoices("OPENAI_API_BASE", "OPENAI_BASE_URL"))
     chat_openai_api_key: str | None = None
     chat_openai_base_url: str | None = None  #
     chat_azure_api_base: str = ""

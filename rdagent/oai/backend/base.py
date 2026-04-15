@@ -567,6 +567,18 @@ class APIBackend(ABC):
                             f"Please set LLM_SETTINGS.embedding_max_length to a smaller value."
                         ) from e
                 else:
+                    embedding_bad_request = embedding and (
+                        "400 Client Error: Bad Request" in str(e)
+                        or ("DashScope embedding" in str(e) and "400" in str(e))
+                    )
+                    if embedding_bad_request:
+                        raise RuntimeError(
+                            "Embedding request was rejected with HTTP 400, so retrying the same payload will not "
+                            "help. RD-Agent stops immediately here instead of repeating many embedding retries. "
+                            "If this happens in CoSTEER knowledge embedding, reduce the stored feedback text or "
+                            "switch to the built-in-model path that avoids custom model-code feedback embeddings."
+                        ) from e
+
                     RD_Agent_TIMER_wrapper.api_fail_count += 1
                     RD_Agent_TIMER_wrapper.latest_api_fail_time = datetime.now(pytz.timezone("Asia/Shanghai"))
 

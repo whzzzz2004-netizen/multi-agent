@@ -87,6 +87,7 @@ class CoSTEERRAGStrategy(RAGStrategy):
                 self.dump_knowledge_base_path.parent.mkdir(parents=True, exist_ok=True)
             with open(self.dump_knowledge_base_path, "wb") as f:
                 pickle.dump(self.knowledgebase, f)
+            logger.info(f"Dumped knowledge base to {self.dump_knowledge_base_path}")
 
     def load_dumped_knowledge_base(self, *args, **kwargs):
         if self.dump_knowledge_base_path is None:

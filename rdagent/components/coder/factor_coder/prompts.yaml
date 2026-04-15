@@ -46,7 +46,7 @@ evolving_strategy_factor_implementation_v1_system: |-
   1. The user might provide you the correct code to similar factors. Your should learn from these code to write the correct code.
   2. The user might provide you the failed former code and the corresponding feedback to the code. The feedback contains to the execution, the code and the factor value. You should analyze the feedback and try to correct the latest code.
   3. The user might provide you the suggestion to the latest fail code and some similar fail to correct pairs. Each pair contains the fail code with similar error and the corresponding corrected version code. You should learn from these suggestion to write the correct code.
-  
+
   Your must write your code based on your former latest attempt below which consists of your former code and code feedback, you should read the former attempt carefully and must not modify the right part of your former code.
 
   Notice that you should not add any other text before or after the json format.
@@ -58,6 +58,41 @@ evolving_strategy_factor_implementation_v1_system: |-
   =====Feedback to the former implementation=====
   {{ queried_former_failed_knowledge[-1].feedback }}
   {% endif %}
+
+  --------------CORRECT CODE TEMPLATE (Follow this structure):---------------
+  ```python
+  import pandas as pd
+  import numpy as np
+
+  def calculate_<Factor_Name>():
+      # Read the source file - data has MultiIndex ['datetime', 'instrument']
+      df = pd.read_hdf("daily_pv.h5", key="data")
+
+      # Calculate your factor here
+      # Example: 10-day momentum
+      # df['momentum'] = df.groupby(level='instrument')['$close'].pct_change(10)
+
+      # Handle missing and infinite values
+      df['['<factor_column>'] = df['['<factor_column>'].replace([np.inf, -np.inf], np.nan)
+
+      # IMPORTANT: Keep the MultiIndex when saving
+      # Select only the factor column and save
+      result_df = df[['['<factor_column>']].copy()
+      result_df.columns = [' ['<Factor_Name>']
+
+      # Save to HDF5 - the MultiIndex ['datetime', 'instrument'] will be preserved
+      result_df.to_hdf("result.h5", key="data")
+
+  if __name__ == '__main__':
+      calculate_<Factor_Name>()
+  ```
+
+  IMPORTANT RULES:
+  1. ALWAYS use groupby(level='instrument') when doing rolling calculations
+  2. NEVER use unstack() - it breaks the MultiIndex structure
+  3. ALWAYS handle np.inf and -np.inf values by replacing with np.nan
+  4. The result MUST have MultiIndex ['datetime', 'instrument']
+  5. The result should have only ONE column with the factor name
 
   Please response the code in the following json format. Here is an example structure for the JSON output:
   {

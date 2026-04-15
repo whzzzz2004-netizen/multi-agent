@@ -3,6 +3,9 @@ from typing import Union
 from rdagent.core.conf import ExtendedBaseSettings
 
 
+DEFAULT_COSTEER_KNOWLEDGE_BASE_PATH = "git_ignore_folder/research_store/knowledge/costeer_knowledge_base.pkl"
+
+
 class CoSTEERSettings(ExtendedBaseSettings):
     """CoSTEER settings, this setting is supposed not to be used directly!!!"""
 
@@ -27,10 +30,10 @@ class CoSTEERSettings(ExtendedBaseSettings):
     v2_error_summary: bool = False
     v2_knowledge_sampler: float = 1.0
 
-    knowledge_base_path: Union[str, None] = None
+    knowledge_base_path: Union[str, None] = DEFAULT_COSTEER_KNOWLEDGE_BASE_PATH
     """Path to the knowledge base"""
 
-    new_knowledge_base_path: Union[str, None] = None
+    new_knowledge_base_path: Union[str, None] = DEFAULT_COSTEER_KNOWLEDGE_BASE_PATH
     """Path to the new knowledge base"""
 
     enable_filelock: bool = False

@@ -67,5 +67,13 @@ hypothesis2experiment:
     The SOTA hypothesis and the corresponding feedback are as follows:
     {{ sota_hypothesis_and_feedback }}
     {% endif %}
+    {% if target_list %}
+    The following {{ targets }} already exist or have already been exported. Do not generate the same ones again, including renamed aliases:
+    {{ target_list }}
+    {% endif %}
+    {% if RAG %}
+    Additional guidance:
+    {{ RAG }}
+    {% endif %}
 
     Please generate the new {{ targets }} based on the information above.

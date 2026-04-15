@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from pathlib import Path
 from typing import Dict
 
 from rdagent.components.coder.CoSTEER.evaluators import CoSTEERSingleFeedback
@@ -18,6 +19,18 @@ from rdagent.core.experiment import FBWorkspace
 from rdagent.oai.llm_conf import LLM_SETTINGS
 from rdagent.oai.llm_utils import APIBackend
 from rdagent.utils.agent.tpl import T
+
+# Load the factor code template
+FACTOR_TEMPLATE_PATH = Path(__file__).parent / "factor_template.py"
+FACTOR_CODE_TEMPLATE = FACTOR_TEMPLATE_PATH.read_text() if FACTOR_TEMPLATE_PATH.exists() else None
+
+
+def get_factor_template() -> str:
+    """Load the factor code template from file."""
+    template_path = Path(__file__).parent / "factor_template.py"
+    if template_path.exists():
+        return template_path.read_text()
+    return ""  # Return empty string if template doesn't exist
 
 
 class FactorMultiProcessEvolvingStrategy(MultiProcessEvolvingStrategy):
