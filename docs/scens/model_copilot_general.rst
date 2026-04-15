@@ -15,17 +15,11 @@ However, reproducing and implementing these models can be a daunting task, requi
 Researchers often face challenges in extracting the essential details from these papers and converting them into functional code.
 And this is where the **General Model Copilot** steps in.
 
-🎥 `Demo <https://rdagent.azurewebsites.net/report_model>`_
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+🎥 Demo
+~~~~~~~~~~~~~~
 
-.. raw:: html
-
-    <div style="display: flex; justify-content: center; align-items: center;">
-      <video width="600" controls>
-        <source src="https://rdagent.azurewebsites.net/media/b35f904765b05099b0fcddbebe041a04f4d7bde239657e5fc24bf0cc.mp4" type="video/mp4">
-        Your browser does not support the video tag.
-      </video>
-    </div>
+This fork does not currently publish a standalone online demo page for this scenario.
+Please use the local CLI commands in this document and the top-level ``README.md`` as the source of truth.
 
 🌟 Introduction
 ~~~~~~~~~~~~~~~~

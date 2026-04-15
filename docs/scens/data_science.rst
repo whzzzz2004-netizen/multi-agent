@@ -76,7 +76,7 @@ By leveraging the **Data Science** Agent, researchers and developers can acceler
 📥 **Prepare Customized datasets**
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-  - A data science competition dataset usually consists of two parts: ``competition dataset`` and ``evaluation dataset``. (We provide `a sample <https://github.com/microsoft/RD-Agent/tree/main/rdagent/scenarios/data_science/example>`_ of a customized dataset named: `arf-12-hours-prediction-task as a reference`.)
+  - A data science competition dataset usually consists of two parts: ``competition dataset`` and ``evaluation dataset``. (We provide `a sample <https://github.com/whzzzz2004-netizen/multi-agent/tree/main/rdagent/scenarios/data_science/example>`_ of a customized dataset named: `arf-12-hours-prediction-task as a reference`.)
     
     - The ``competition dataset`` contains **training data**, **test data**, **description files**, **formatted submission files**, **data sampling codes**.
     
@@ -195,7 +195,7 @@ By leveraging the **Data Science** Agent, researchers and developers can acceler
 
             dotenv set DS_SAMPLE_DATA_BY_LLM False
 
-        - In addition, we provide a data sampling method in `rdagent.scenarios.data_science.debug.data.create_debug_data <https://github.com/microsoft/RD-Agent/blob/main/rdagent/scenarios/data_science/debug/data.py#L605>`_, in this method, the default sampling ratio (parameter: ``min_frac``) is 1%, if 1% of the data is less than 5, then 5 data will be sampled (parameter: ``min_num``), you can use this method by the following two ways.
+        - In addition, we provide a data sampling method in `rdagent.scenarios.data_science.debug.data.create_debug_data <https://github.com/whzzzz2004-netizen/multi-agent/blob/main/rdagent/scenarios/data_science/debug/data.py#L605>`_, in this method, the default sampling ratio (parameter: ``min_frac``) is 1%, if 1% of the data is less than 5, then 5 data will be sampled (parameter: ``min_num``), you can use this method by the following two ways.
 
           - You can set ``DS_SAMPLE_DATA_BY_LLM`` to ``False`` in the ``.env`` file so that when the program runs, it will use the sampling code provided by RD-Agent.
 
@@ -405,7 +405,7 @@ By utilizing the **Kaggle Agent**, data scientists can craft innovative solution
 
       - The ``ds_data/zip_files`` folder contains a zip file of the raw competition data downloaded from kaggle website.
 
-  - At runtime, RD-Agent will automatically build the Docker image specified at `rdagent/scenarios/kaggle/docker/mle_bench_docker/Dockerfile <https://github.com/microsoft/RD-Agent/blob/main/rdagent/scenarios/kaggle/docker/mle_bench_docker/Dockerfile>`_. This image is responsible for downloading the required datasets and grading files for MLE-Bench.
+  - At runtime, RD-Agent will automatically build the Docker image specified at `rdagent/scenarios/kaggle/docker/mle_bench_docker/Dockerfile <https://github.com/whzzzz2004-netizen/multi-agent/blob/main/rdagent/scenarios/kaggle/docker/mle_bench_docker/Dockerfile>`_. This image is responsible for downloading the required datasets and grading files for MLE-Bench.
 
   Note: The first run may take longer than subsequent runs as the Docker image and data are being downloaded and set up for the first time.
 

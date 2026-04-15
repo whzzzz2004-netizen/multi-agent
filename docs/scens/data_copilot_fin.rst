@@ -20,17 +20,11 @@ Therefore, there is an urgent need for a systematic approach to design a framewo
 And this is where the **Finance Data Copilot** steps in.
 
 
-🎥 `Demo <https://rdagent.azurewebsites.net/report_factor>`_
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+🎥 Demo
+~~~~~~~~~~~~~~
 
-.. raw:: html
-
-    <div style="display: flex; justify-content: center; align-items: center;">
-      <video width="600" controls>
-        <source src="https://rdagent.azurewebsites.net/media/7b14b2bd3d8771da9cf7eb799b6d96729cec3d35c8d4f68060f3e2fd.mp4" type="video/mp4">
-        Your browser does not support the video tag.
-      </video>
-    </div>
+This fork does not currently publish a standalone online demo page for this scenario.
+Please use the local CLI commands in this document and the top-level ``README.md`` as the source of truth.
 
 
 🌟 Introduction

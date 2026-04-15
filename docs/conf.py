@@ -10,9 +10,9 @@ import subprocess
 
 latest_tag = subprocess.check_output(["git", "describe", "--tags", "--abbrev=0"], text=True).strip()
 
-project = "RDAgent"
-copyright = "2024, Microsoft"
-author = "Microsoft"
+project = "Multi-Agent"
+copyright = "2026, whzzzz2004-netizen"
+author = "whzzzz2004-netizen"
 
 # -- General configuration ---------------------------------------------------
 # https://www.sphinx-doc.org/en/master/usage/configuration.html#general-configuration
@@ -66,7 +66,7 @@ html_static_path = ["_static"]
 html_favicon = "_static/favicon.ico"
 
 html_theme_options = {
-    "source_repository": "https://github.com/microsoft/RD-Agent",
+    "source_repository": "https://github.com/whzzzz2004-netizen/multi-agent",
     "source_branch": "main",
     "source_directory": "docs/",
 }

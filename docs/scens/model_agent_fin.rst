@@ -17,17 +17,11 @@ However, the process of developing and optimizing these models can be labor-inte
 And this is where the **Finance Model Agent** steps in.
 
 
-🎥 `Demo <https://rdagent.azurewebsites.net/model_loop>`_
-~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+🎥 Demo
+~~~~~~~~~~~~~~
 
-.. raw:: html
-
-    <div style="display: flex; justify-content: center; align-items: center;">
-      <video width="600" controls>
-        <source src="https://rdagent.azurewebsites.net/media/d85e8cab1da1cd3501d69ce837452f53a971a24911eae7bfa9237137.mp4" type="video/mp4">
-        Your browser does not support the video tag.
-      </video>
-    </div>
+This fork does not currently publish a standalone online demo page for this scenario.
+Please use the local CLI commands in this document and the top-level ``README.md`` as the source of truth.
 
 
 🌟 Introduction

@@ -62,4 +62,4 @@ The raw dataset for `playground-series-s4e9` comes from Kaggle. You can apply fo
 
 ---
 
-**NOTE:** For more information about the dataset, please refer to the [documentation](https://rdagent.readthedocs.io/en/latest/scens/data_science.html).
+**NOTE:** For more information about the dataset, please refer to the [documentation](https://github.com/whzzzz2004-netizen/multi-agent/blob/main/docs/scens/data_science.rst).

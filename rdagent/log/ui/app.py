@@ -744,7 +744,7 @@ if isinstance(state.scenario, GeneralModelScenario):
 """
 # Config Sidebar
 with st.sidebar:
-    st.markdown("# RD-Agent🤖  [:grey[@GitHub]](https://github.com/microsoft/RD-Agent)")
+    st.markdown("# Multi-Agent  [:grey[@GitHub]](https://github.com/whzzzz2004-netizen/multi-agent)")
     st.subheader(":blue[Table of Content]", divider="blue")
     st.markdown(toc)
     st.subheader(":orange[Control Panel]", divider="red")
