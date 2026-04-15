@@ -2,23 +2,21 @@
 Policy
 ======
 
-This project welcomes contributions and suggestions.  Most contributions require you to agree to a
-Contributor License Agreement (CLA) declaring that you have the right to, and actually do, grant us
-the rights to use your contribution. For details, visit https://cla.opensource.microsoft.com.
+This repository welcomes contributions and suggestions.
 
-When you submit a pull request, a CLA bot will automatically determine whether you need to provide
-a CLA and decorate the PR appropriately (e.g., status check, comment). Simply follow the instructions
-provided by the bot. You will only need to do this once across all repos using our CLA.
+Before submitting changes, please make sure that:
 
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
-For more information see the [Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/) or
-contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with any additional questions or comments.
+- You have the right to contribute the code, text, or assets you are submitting.
+- Your contribution does not knowingly include confidential or third-party restricted material.
+- Your pull request description clearly explains what changed and why.
+
+This fork does not currently rely on Microsoft's CLA workflow. If contribution rules change later, the repository maintainer can document the updated process in this file.
+
+Please also follow the repository's general collaboration expectations described in the top-level ``CODE_OF_CONDUCT.md`` file.
 
 Trademarks
 ==========
 
-This project may contain trademarks or logos for projects, products, or services. Authorized use of Microsoft 
-trademarks or logos is subject to and must follow 
-[Microsoft's Trademark & Brand Guidelines](https://www.microsoft.com/en-us/legal/intellectualproperty/trademarks/usage/general).
-Use of Microsoft trademarks or logos in modified versions of this project must not cause confusion or imply Microsoft sponsorship.
-Any use of third-party trademarks or logos are subject to those third-party's policies.
+This project may reference third-party product names, trademarks, or logos.
+Those remain the property of their respective owners.
+Use them in a way that does not imply endorsement, sponsorship, or affiliation unless that relationship actually exists.

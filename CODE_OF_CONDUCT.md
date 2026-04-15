@@ -1,9 +1,12 @@
-# Microsoft Open Source Code of Conduct
+# Code of Conduct
 
-This project has adopted the [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/).
+This project aims to keep collaboration respectful, welcoming, and constructive.
 
-Resources:
+Please participate in a way that helps others feel safe contributing:
 
-- [Microsoft Open Source Code of Conduct](https://opensource.microsoft.com/codeofconduct/)
-- [Microsoft Code of Conduct FAQ](https://opensource.microsoft.com/codeofconduct/faq/)
-- Contact [opencode@microsoft.com](mailto:opencode@microsoft.com) with questions or concerns
+- Be respectful in discussion and code review.
+- Assume good intent, but give clear and honest feedback.
+- Avoid harassment, discrimination, and personal attacks.
+- Focus on improving the work, not judging the person.
+
+If you have questions or concerns about conduct in this repository, please open a private issue or contact the repository maintainer through GitHub.

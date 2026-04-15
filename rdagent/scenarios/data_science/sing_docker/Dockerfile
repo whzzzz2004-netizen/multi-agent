@@ -30,7 +30,7 @@ COPY ./kaggle_environment.yaml /workspace
 RUN cd /workspace && conda env create -f /workspace/kaggle_environment.yaml
 
 # RD-Agent
-RUN cd /workspace && git clone https://github.com/microsoft/RD-Agent
+RUN cd /workspace && git clone https://github.com/whzzzz2004-netizen/multi-agent
 RUN cd RD-Agent && git fetch && make dev
 
 

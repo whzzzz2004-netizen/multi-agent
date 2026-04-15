@@ -18,7 +18,7 @@
 
 ```bash
 # --- 1a. Clone 代码 ---
-git clone git@github.com:microsoft/RD-Agent.git ~/RD-Agent
+git clone git@github.com:whzzzz2004-netizen/multi-agent.git ~/RD-Agent
 cd ~/RD-Agent
 
 # --- 1b. 基础 conda 环境 ---
