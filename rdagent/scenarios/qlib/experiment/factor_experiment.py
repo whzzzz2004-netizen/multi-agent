@@ -10,7 +10,7 @@ from rdagent.components.coder.factor_coder.factor import (
 )
 from rdagent.core.experiment import Task
 from rdagent.core.scenario import Scenario
-from rdagent.scenarios.qlib.experiment.utils import get_data_folder_intro
+from rdagent.scenarios.qlib.experiment.utils import factor_mode_instruction, get_data_folder_intro, resolve_factor_data_mode
 from rdagent.scenarios.qlib.experiment.workspace import QlibFBWorkspace
 from rdagent.scenarios.shared.get_runtime_info import get_runtime_environment_by_env
 from rdagent.utils.agent.tpl import T
@@ -35,6 +35,7 @@ class QlibFactorScenario(Scenario):
                 runtime_environment=self.get_runtime_environment(),
             )
         )
+        self._background += "\n\n" + factor_mode_instruction(resolve_factor_data_mode())
         self._source_data = deepcopy(get_data_folder_intro())
         self._output_format = deepcopy(T(".prompts:qlib_factor_output_format").r())
         self._interface = deepcopy(T(".prompts:qlib_factor_interface").r())

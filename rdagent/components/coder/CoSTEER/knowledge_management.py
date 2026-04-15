@@ -358,6 +358,18 @@ class CoSTEERRAGStrategyV2(CoSTEERRAGStrategy):
         self.current_generated_trace_count = 0
         self.settings = settings
 
+    @staticmethod
+    def _task_family(task: Task) -> str:
+        return task.__class__.__name__
+
+    def _filter_success_knowledge_by_task_family(self, target_task: Task) -> dict[str, CoSTEERKnowledge]:
+        target_family = self._task_family(target_task)
+        return {
+            task_info: knowledge
+            for task_info, knowledge in self.knowledgebase.success_task_to_knowledge_dict.items()
+            if self._task_family(knowledge.target_task) == target_family
+        }
+
     def generate_knowledge(
         self,
         evolving_trace: list[EvoStep],
@@ -661,21 +673,24 @@ class CoSTEERRAGStrategyV2(CoSTEERRAGStrategy):
                             ].append(target_knowledge)
 
                 # finally add embedding related knowledge
-                knowledge_base_success_task_list = list(self.knowledgebase.success_task_to_knowledge_dict)
+                same_family_success_knowledge = self._filter_success_knowledge_by_task_family(target_task)
+                knowledge_base_success_task_list = list(same_family_success_knowledge)
 
-                similarity = calculate_embedding_distance_between_str_list(
-                    [target_task_information],
-                    knowledge_base_success_task_list,
-                )[0]
-                similar_indexes = sorted(
-                    range(len(similarity)),
-                    key=lambda i: similarity[i],
-                    reverse=True,
-                )
-                embedding_similar_successful_knowledge = [
-                    self.knowledgebase.success_task_to_knowledge_dict[knowledge_base_success_task_list[index]]
-                    for index in similar_indexes
-                ]
+                embedding_similar_successful_knowledge = []
+                if knowledge_base_success_task_list:
+                    similarity = calculate_embedding_distance_between_str_list(
+                        [target_task_information],
+                        knowledge_base_success_task_list,
+                    )[0]
+                    similar_indexes = sorted(
+                        range(len(similarity)),
+                        key=lambda i: similarity[i],
+                        reverse=True,
+                    )
+                    embedding_similar_successful_knowledge = [
+                        same_family_success_knowledge[knowledge_base_success_task_list[index]]
+                        for index in similar_indexes
+                    ]
                 for knowledge in embedding_similar_successful_knowledge:
                     if (
                         knowledge

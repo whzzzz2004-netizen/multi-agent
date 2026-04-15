@@ -6,7 +6,9 @@ This will
 - autoamtically load dotenv
 """
 
+import os
 import sys
+from contextlib import contextmanager
 
 from dotenv import load_dotenv
 
@@ -41,11 +43,31 @@ from rdagent.app.utils.info import collect_info
 from rdagent.log.mle_summary import grade_summary as grade_summary
 
 app = typer.Typer()
+daily_factor_app = typer.Typer()
+minute_factor_app = typer.Typer()
 
 CheckoutOption = Annotated[bool, typer.Option("--checkout/--no-checkout", "-c/-C")]
 CheckEnvOption = Annotated[bool, typer.Option("--check-env/--no-check-env", "-e/-E")]
 CheckDockerOption = Annotated[bool, typer.Option("--check-docker/--no-check-docker", "-d/-D")]
 CheckPortsOption = Annotated[bool, typer.Option("--check-ports/--no-check-ports", "-p/-P")]
+
+
+@contextmanager
+def _temporary_env(**updates):
+    old_values = {key: os.environ.get(key) for key in updates}
+    try:
+        for key, value in updates.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = str(value)
+        yield
+    finally:
+        for key, value in old_values.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def ui(port=19899, log_dir="", debug: bool = False, data_science: bool = False):
@@ -164,8 +186,96 @@ def fin_mine_factors_cli(
     checkout: CheckoutOption = True,
     base_features_path: Optional[str] = None,
     batch_size: int = 10,
-):
+    ):
     fin_mine_factors(
+        path=path,
+        step_n=step_n,
+        loop_n=loop_n,
+        all_duration=all_duration,
+        checkout=checkout,
+        base_features_path=base_features_path,
+        batch_size=batch_size,
+    )
+
+
+@app.command(name="daily_factor")
+def daily_factor_cli(
+    path: Optional[str] = None,
+    step_n: Optional[int] = None,
+    loop_n: Optional[int] = None,
+    all_duration: Optional[str] = None,
+    checkout: CheckoutOption = True,
+    base_features_path: Optional[str] = None,
+    batch_size: int = 1,
+):
+    """Mine factors from daily data with the simplest default path."""
+    with _temporary_env(RDAGENT_FACTOR_DATA_MODE="daily"):
+        fin_mine_factors(
+            path=path,
+            step_n=step_n,
+            loop_n=loop_n,
+            all_duration=all_duration,
+            checkout=checkout,
+            base_features_path=base_features_path,
+            batch_size=batch_size,
+        )
+
+
+@app.command(name="minute_factor")
+def minute_factor_cli(
+    path: Optional[str] = None,
+    step_n: Optional[int] = None,
+    loop_n: Optional[int] = None,
+    all_duration: Optional[str] = None,
+    checkout: CheckoutOption = True,
+    base_features_path: Optional[str] = None,
+    batch_size: int = 1,
+):
+    """Mine daily factors from minute and quote sample data."""
+    with _temporary_env(RDAGENT_FACTOR_DATA_MODE="minute"):
+        fin_mine_factors(
+            path=path,
+            step_n=step_n,
+            loop_n=loop_n,
+            all_duration=all_duration,
+            checkout=checkout,
+            base_features_path=base_features_path,
+            batch_size=batch_size,
+        )
+
+
+@daily_factor_app.callback(invoke_without_command=True)
+def daily_factor_entry(
+    path: Optional[str] = None,
+    step_n: Optional[int] = None,
+    loop_n: Optional[int] = None,
+    all_duration: Optional[str] = None,
+    checkout: CheckoutOption = True,
+    base_features_path: Optional[str] = None,
+    batch_size: int = 1,
+):
+    daily_factor_cli(
+        path=path,
+        step_n=step_n,
+        loop_n=loop_n,
+        all_duration=all_duration,
+        checkout=checkout,
+        base_features_path=base_features_path,
+        batch_size=batch_size,
+    )
+
+
+@minute_factor_app.callback(invoke_without_command=True)
+def minute_factor_entry(
+    path: Optional[str] = None,
+    step_n: Optional[int] = None,
+    loop_n: Optional[int] = None,
+    all_duration: Optional[str] = None,
+    checkout: CheckoutOption = True,
+    base_features_path: Optional[str] = None,
+    batch_size: int = 1,
+):
+    minute_factor_cli(
         path=path,
         step_n=step_n,
         loop_n=loop_n,

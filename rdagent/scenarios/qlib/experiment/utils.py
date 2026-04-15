@@ -1,13 +1,139 @@
 import random
 import re
 import shutil
+import os
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 from jinja2 import Environment, StrictUndefined
 
 from rdagent.components.coder.factor_coder.config import FACTOR_COSTEER_SETTINGS
 from rdagent.utils.env import QTDockerEnv
+
+
+def _minute_timestamps_for_day(day: pd.Timestamp) -> pd.DatetimeIndex:
+    morning = pd.date_range(day.normalize() + pd.Timedelta(hours=9, minutes=30), periods=120, freq="min")
+    afternoon = pd.date_range(day.normalize() + pd.Timedelta(hours=13), periods=120, freq="min")
+    return morning.append(afternoon)
+
+
+def _build_intraday_profile(base_daily_df: pd.DataFrame, minutes_per_day: int = 240) -> tuple[np.ndarray, np.ndarray]:
+    x = np.linspace(-1.0, 1.0, minutes_per_day)
+    volume_curve = 0.55 + 0.45 * np.abs(x)
+    volume_curve = volume_curve / volume_curve.sum()
+    drift_curve = np.linspace(0.0, 1.0, minutes_per_day)
+    return volume_curve, drift_curve
+
+
+def _generate_minute_sample_data(
+    daily_path: Path,
+    minute_pv_path: Path,
+    minute_quote_path: Path,
+    max_days: int,
+    max_instruments: int,
+) -> None:
+    daily_df = pd.read_hdf(daily_path, key="data").sort_index()
+    if daily_df.empty:
+        raise ValueError(f"Cannot generate minute sample data from empty source: {daily_path}")
+
+    instruments = list(dict.fromkeys(daily_df.index.get_level_values("instrument")))
+    chosen_instruments = instruments[:max_instruments]
+    available_dates = daily_df.index.get_level_values("datetime").unique().sort_values()
+    chosen_dates = available_dates[-max_days:]
+    sampled_daily = daily_df.loc[pd.IndexSlice[chosen_dates, chosen_instruments], :].copy()
+
+    volume_curve, drift_curve = _build_intraday_profile(sampled_daily)
+    minute_frames: list[pd.DataFrame] = []
+    quote_frames: list[pd.DataFrame] = []
+
+    for (dt, instrument), row in sampled_daily.iterrows():
+        base_open = float(row["$open"])
+        base_close = float(row["$close"])
+        base_high = float(row["$high"])
+        base_low = float(row["$low"])
+        base_volume = max(float(row["$volume"]), 0.0)
+        minute_index = pd.MultiIndex.from_product(
+            [_minute_timestamps_for_day(pd.Timestamp(dt)), [instrument]],
+            names=["datetime", "instrument"],
+        )
+
+        trend = base_open + (base_close - base_open) * drift_curve
+        oscillation = 0.12 * (base_high - base_low + 1e-6) * np.sin(np.linspace(0.0, 4.0 * np.pi, len(drift_curve)))
+        mid = trend + oscillation
+        mid = np.clip(mid, base_low, base_high)
+
+        prev_close = np.concatenate(([base_open], mid[:-1]))
+        close = mid
+        high = np.maximum(prev_close, close) + 0.05 * (base_high - base_low + 1e-6)
+        low = np.minimum(prev_close, close) - 0.05 * (base_high - base_low + 1e-6)
+        high = np.clip(high, base_low, base_high)
+        low = np.clip(low, base_low, base_high)
+
+        minute_volume = np.maximum(np.round(base_volume * volume_curve), 0.0)
+        if minute_volume.sum() > 0:
+            minute_volume[-1] += base_volume - minute_volume.sum()
+        vwap = (prev_close + high + low + close) / 4.0
+
+        spread = np.maximum(np.abs(close) * 0.0005, 1e-4)
+        bid1 = close - spread / 2.0
+        ask1 = close + spread / 2.0
+        bid1_size = np.maximum(np.round(minute_volume * (0.45 + 0.1 * np.sin(np.linspace(0, 2 * np.pi, len(close))))), 1.0)
+        ask1_size = np.maximum(np.round(minute_volume * (0.55 - 0.1 * np.sin(np.linspace(0, 2 * np.pi, len(close))))), 1.0)
+
+        minute_frames.append(
+            pd.DataFrame(
+                {
+                    "$open": prev_close,
+                    "$close": close,
+                    "$high": high,
+                    "$low": low,
+                    "$volume": minute_volume,
+                    "$vwap": vwap,
+                },
+                index=minute_index,
+            )
+        )
+        quote_frames.append(
+            pd.DataFrame(
+                {
+                    "$bid1": bid1,
+                    "$ask1": ask1,
+                    "$bid1_size": bid1_size,
+                    "$ask1_size": ask1_size,
+                    "$mid_price": (bid1 + ask1) / 2.0,
+                    "$spread_bps": ((ask1 - bid1) / np.maximum((bid1 + ask1) / 2.0, 1e-8)) * 10000.0,
+                },
+                index=minute_index,
+            )
+        )
+
+    minute_pv_df = pd.concat(minute_frames).sort_index()
+    minute_quote_df = pd.concat(quote_frames).sort_index()
+    minute_pv_df.to_hdf(minute_pv_path, key="data")
+    minute_quote_df.to_hdf(minute_quote_path, key="data")
+
+
+def ensure_sample_minute_data_files() -> None:
+    folder_specs = [
+        (Path(FACTOR_COSTEER_SETTINGS.data_folder), 30, 20),
+        (Path(FACTOR_COSTEER_SETTINGS.data_folder_debug), 5, 5),
+    ]
+    for folder, max_days, max_instruments in folder_specs:
+        daily_path = folder / "daily_pv.h5"
+        minute_pv_path = folder / "minute_pv_sample.h5"
+        minute_quote_path = folder / "minute_quote_sample.h5"
+        if not daily_path.exists():
+            continue
+        if minute_pv_path.exists() and minute_quote_path.exists():
+            continue
+        _generate_minute_sample_data(
+            daily_path=daily_path,
+            minute_pv_path=minute_pv_path,
+            minute_quote_path=minute_quote_path,
+            max_days=max_days,
+            max_instruments=max_instruments,
+        )
 
 
 def generate_data_folder_from_qlib():
@@ -49,6 +175,7 @@ def generate_data_folder_from_qlib():
         Path(__file__).parent / "factor_data_template" / "README.md",
         Path(FACTOR_COSTEER_SETTINGS.data_folder_debug) / "README.md",
     )
+    ensure_sample_minute_data_files()
 
 
 def get_file_desc(p: Path, variable_list=[]) -> str:
@@ -144,6 +271,35 @@ def get_file_desc(p: Path, variable_list=[]) -> str:
         )
 
 
+def resolve_factor_data_mode() -> str:
+    mode = os.environ.get("RDAGENT_FACTOR_DATA_MODE", "all").strip().lower()
+    if mode not in {"all", "daily", "minute"}:
+        return "all"
+    return mode
+
+
+def factor_mode_instruction(mode: str | None = None) -> str:
+    selected_mode = resolve_factor_data_mode() if mode is None else mode
+    instructions = {
+        "daily": (
+            "Current factor mining mode: daily_factor.\n"
+            "Prefer daily source files such as daily_pv.h5.\n"
+            "Produce one daily factor value per trading day and instrument."
+        ),
+        "minute": (
+            "Current factor mining mode: minute_factor.\n"
+            "Prefer minute-level source files such as minute_pv_sample.h5 and minute_quote_sample.h5.\n"
+            "You may aggregate intraday OHLCV and bid/ask information into one daily factor value per trading day and instrument.\n"
+            "Do not output minute-level factor values."
+        ),
+        "all": (
+            "Current factor mining mode: generic.\n"
+            "You may choose from the available source files, but the final result must be one daily factor value per trading day and instrument."
+        ),
+    }
+    return instructions[selected_mode]
+
+
 def get_data_folder_intro(fname_reg: str = ".*", flags=0, variable_mapping=None) -> str:
     """
     Directly get the info of the data folder.
@@ -170,11 +326,18 @@ def get_data_folder_intro(fname_reg: str = ".*", flags=0, variable_mapping=None)
         # FIXME: (xiao) I think this is writing in a hard-coded way.
         # get data folder intro does not imply that we are generating the data folder.
         generate_data_folder_from_qlib()
+    ensure_sample_minute_data_files()
+    mode = resolve_factor_data_mode()
+    pattern_by_mode = {
+        "all": fname_reg,
+        "daily": r"^(daily_.*\.h5|README\.md)$",
+        "minute": r"^(minute_.*\.h5|README\.md)$",
+    }
     content_l = []
     for p in Path(FACTOR_COSTEER_SETTINGS.data_folder_debug).iterdir():
-        if re.match(fname_reg, p.name, flags) is not None:
+        if re.match(pattern_by_mode[mode], p.name, flags) is not None:
             if variable_mapping:
                 content_l.append(get_file_desc(p, variable_mapping.get(p.stem, [])))
             else:
                 content_l.append(get_file_desc(p))
-    return "\n----------------- file splitter -------------\n".join(content_l)
+    return factor_mode_instruction(mode) + "\n\n" + "\n----------------- file splitter -------------\n".join(content_l)

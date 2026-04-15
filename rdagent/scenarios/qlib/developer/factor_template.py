@@ -13,6 +13,10 @@ def calculate_volume_imbalance():
     公式: Vt - AVG(Vt-n) 其中 n=20
     """
     # 1. 读取数据
+    # 可以按任务选择不同粒度的数据文件，例如：
+    # - daily_pv.h5
+    # - minute_pv_sample.h5
+    # - minute_quote_sample.h5
     df = pd.read_hdf("daily_pv.h5", key="data")
     
     # 2. 确保成交量是数值类型（注意列名可能是 'volume' 或 '$volume'）

@@ -8,6 +8,7 @@ provide narrower workflows for day-to-day research operations.
 import asyncio
 import json
 import math
+import re
 from pathlib import Path
 from typing import Any, Optional
 
@@ -15,6 +16,8 @@ import fire
 
 from rdagent.components.coder.model_coder.task_loader import ModelExperimentLoaderFromPDFfiles
 from rdagent.components.document_reader.document_reader import extract_first_page_screenshot_from_pdf
+from rdagent.components.coder.factor_coder.config import FACTOR_COSTEER_SETTINGS
+from rdagent.components.coder.factor_coder.eva_utils import evaluate_factor_ic_from_workspace
 from rdagent.app.qlib_rd_loop.conf import FACTOR_PROP_SETTING, MODEL_PROP_SETTING
 from rdagent.app.qlib_rd_loop.factor import FactorRDLoop
 from rdagent.app.qlib_rd_loop.model import ModelRDLoop
@@ -67,6 +70,41 @@ class FactorMiningLoop(FactorRDLoop):
 
     def record(self, prev_out):
         exp = prev_out.get("coding") or prev_out.get("direct_exp_gen", {}).get("exp_gen")
+        exported_count = 0
+        if exp is not None and getattr(exp, "prop_dev_feedback", None) is not None:
+            for task, workspace, feedback in zip(exp.sub_tasks, exp.sub_workspace_list, exp.prop_dev_feedback):
+                if workspace is None or feedback is None or not bool(feedback.final_decision):
+                    continue
+                try:
+                    _, df = workspace.execute("All")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(f"Failed to reload factor dataframe for reviewed export: task={task.factor_name}; {exc}")
+                    continue
+                if df is None or df.empty:
+                    continue
+                ic_feedback, full_sample_ic = evaluate_factor_ic_from_workspace(workspace, data_type="All")
+                if full_sample_ic is None or abs(full_sample_ic) < FACTOR_COSTEER_SETTINGS.min_abs_ic:
+                    logger.info(
+                        f"Skip reviewed export for factor {task.factor_name} because full-sample IC did not pass. "
+                        f"{ic_feedback}"
+                    )
+                    continue
+                logic_summary = task.factor_description
+                review_notes = "\n".join(
+                    part for part in [feedback.execution, feedback.return_checking, feedback.code, ic_feedback] if part
+                )
+                tags = _infer_factor_registry_tags(task, feedback)
+                tags.append("ic_passed")
+                tags = sorted(set(tags))
+                workspace.export_reviewed_factor(
+                    df,
+                    accepted=True,
+                    logic_summary=logic_summary,
+                    tags=tags,
+                    review_notes=review_notes,
+                    ic_score=full_sample_ic,
+                )
+                exported_count += 1
         feedback = HypothesisFeedback(
             reason=(
                 "Factor mining mode finished after coding/evaluation. "
@@ -83,8 +121,45 @@ class FactorMiningLoop(FactorRDLoop):
             self.trace.sync_dag_parent_and_hist((exp, feedback), prev_out[self.LOOP_IDX_KEY])
         logger.info(
             f"Factor mining loop recorded. Backtest step was skipped by design. "
-            f"Batch progress: {self.mined_factor_count}/{self.batch_size}."
+            f"Batch progress: {self.mined_factor_count}/{self.batch_size}. "
+            f"Accepted factor exports: {exported_count}."
         )
+
+
+def _infer_factor_registry_tags(task, feedback) -> list[str]:
+    content = " ".join(
+        [
+            getattr(task, "factor_name", "") or "",
+            getattr(task, "factor_description", "") or "",
+            getattr(task, "factor_formulation", "") or "",
+            str(getattr(task, "variables", {}) or {}),
+            getattr(feedback, "code", "") or "",
+        ]
+    ).lower()
+    tags: set[str] = set()
+    keyword_to_tag = {
+        "momentum": "momentum",
+        "reversal": "reversal",
+        "volatility": "volatility",
+        "volume": "volume",
+        "vwap": "vwap",
+        "spread": "liquidity",
+        "liquidity": "liquidity",
+        "bid": "quote",
+        "ask": "quote",
+        "minute": "minute_input",
+        "intraday": "minute_input",
+        "microstructure": "microstructure",
+        "gap": "gap",
+        "trend": "trend",
+        "acceleration": "acceleration",
+    }
+    for keyword, tag in keyword_to_tag.items():
+        if keyword in content:
+            tags.add(tag)
+    if "future-information leak" not in content and "time leakage" not in content:
+        tags.add("leakage_checked")
+    return sorted(tags)
 
 
 # Keep only propose -> coding -> record. The inherited FactorRDLoop still exists unchanged;

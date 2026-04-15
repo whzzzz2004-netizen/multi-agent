@@ -65,7 +65,11 @@ evolving_strategy_factor_implementation_v1_system: |-
   import numpy as np
 
   def calculate_<Factor_Name>():
-      # Read the source file - data has MultiIndex ['datetime', 'instrument']
+      # Read the appropriate source file - all data files use key="data"
+      # Examples:
+      #   daily_pv.h5           -> daily OHLCV
+      #   minute_pv_sample.h5   -> minute OHLCV/VWAP sample
+      #   minute_quote_sample.h5 -> minute bid/ask sample
       df = pd.read_hdf("daily_pv.h5", key="data")
 
       # Calculate your factor here
@@ -93,6 +97,8 @@ evolving_strategy_factor_implementation_v1_system: |-
   3. ALWAYS handle np.inf and -np.inf values by replacing with np.nan
   4. The result MUST have MultiIndex ['datetime', 'instrument']
   5. The result should have only ONE column with the factor name
+  6. NEVER use future information such as shift(-1), pct_change(-n), diff(-n), centered rolling windows, or backward fill
+  7. You may use either daily or minute-level source files, but the final output MUST be daily: one factor value per trading day and instrument
 
   Please response the code in the following json format. Here is an example structure for the JSON output:
   {

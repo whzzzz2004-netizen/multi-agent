@@ -120,8 +120,13 @@ def _process_message_and_df(
 
     time_diff = df.index.get_level_values("datetime").to_series().diff().dropna().unique()
     if pd.Timedelta(minutes=1) in time_diff:
-        logger.warning(f"Factor data from {source_name} is not generated.")
-        return error_message
+        logger.warning(
+            f"Factor data from {source_name} is minute-level. The current quant pipeline expects daily factor outputs."
+        )
+        return (
+            f"{error_message}Factor data from {source_name} is minute-level and was skipped. "
+            "Please aggregate minute-level inputs into daily factor outputs before saving result.h5. "
+        )
 
     factor_dfs.append(normalized_df)
     logger.info(f"Factor data from {source_name} is successfully generated.")

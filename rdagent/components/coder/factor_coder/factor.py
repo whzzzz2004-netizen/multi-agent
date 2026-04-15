@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import subprocess
 import uuid
 from datetime import datetime
 from pathlib import Path
-from typing import Tuple, Union
+from typing import Any, Tuple, Union
 
 import pandas as pd
 from filelock import FileLock
@@ -123,8 +124,109 @@ class FactorFBWorkspace(FBWorkspace):
             return default
         return value.strip().lower() in {"1", "true", "yes", "y", "on"}
 
-    def _update_factor_manifest(self, factor_name: str, latest_path: Path, df: pd.DataFrame, factor_hash: str) -> None:
+    @staticmethod
+    def _infer_time_granularity(df: pd.DataFrame) -> str:
+        if df is None or df.empty or "datetime" not in df.index.names:
+            return "unknown"
+        dt_index = pd.to_datetime(df.index.get_level_values("datetime"))
+        diffs = dt_index.to_series().diff().dropna()
+        positive_diffs = diffs[diffs > pd.Timedelta(0)].unique()
+        if len(positive_diffs) == 0:
+            return "unknown"
+        min_step = min(positive_diffs)
+        if min_step <= pd.Timedelta(minutes=1):
+            return "minute"
+        if min_step >= pd.Timedelta(days=1):
+            return "daily"
+        return str(min_step)
+
+    @staticmethod
+    def _infer_factor_tags(task: FactorTask | None, extra_tags: list[str] | None = None) -> list[str]:
+        content = " ".join(
+            [
+                getattr(task, "factor_name", "") or "",
+                getattr(task, "factor_description", "") or "",
+                getattr(task, "factor_formulation", "") or "",
+                str(getattr(task, "variables", {}) or {}),
+            ]
+        ).lower()
+        tags: set[str] = set(extra_tags or [])
+        keyword_to_tag = {
+            "momentum": "momentum",
+            "reversal": "reversal",
+            "rev_": "reversal",
+            "volatility": "volatility",
+            "range": "range",
+            "volume": "volume",
+            "liquidity": "liquidity",
+            "spread": "liquidity",
+            "vwap": "vwap",
+            "quote": "quote",
+            "bid": "quote",
+            "ask": "quote",
+            "minute": "minute_input",
+            "intraday": "minute_input",
+            "microstructure": "microstructure",
+            "gap": "gap",
+            "price-volume": "price_volume",
+            "correlation": "correlation",
+            "acceleration": "acceleration",
+            "trend": "trend",
+        }
+        for keyword, tag in keyword_to_tag.items():
+            if keyword in content:
+                tags.add(tag)
+        if "minute_quote_sample.h5" in content:
+            tags.update({"minute_input", "quote"})
+        if "minute_pv_sample.h5" in content:
+            tags.add("minute_input")
+        if "daily_pv.h5" in content:
+            tags.add("daily_input")
+        return sorted(tags)
+
+    def _write_factor_metadata(
+        self,
+        factor_name: str,
+        latest_path: Path,
+        df: pd.DataFrame,
+        factor_hash: str,
+        review_metadata: dict[str, Any] | None = None,
+    ) -> None:
+        metadata_path = latest_path.with_suffix(".meta.json")
+        task = self.target_task if isinstance(self.target_task, FactorTask) else None
+        metadata = {
+            "factor_name": factor_name,
+            "factor_description": task.factor_description if task is not None else None,
+            "factor_formulation": task.factor_formulation if task is not None else None,
+            "variables": task.variables if task is not None else None,
+            "hash": factor_hash,
+            "rows": len(df),
+            "non_null": int(df.iloc[:, 0].notna().sum()),
+            "time_granularity": self._infer_time_granularity(df),
+            "logic_summary": (
+                task.factor_description if task is not None else "No factor description recorded."
+            ),
+            "tags": self._infer_factor_tags(task, extra_tags=(review_metadata or {}).get("tags")),
+            "updated_at": datetime.now().isoformat(timespec="seconds"),
+            "workspace_path": str(self.workspace_path),
+        }
+        if review_metadata:
+            metadata.update(review_metadata)
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _update_factor_manifest(
+        self,
+        factor_name: str,
+        latest_path: Path,
+        df: pd.DataFrame,
+        factor_hash: str,
+        review_metadata: dict[str, Any] | None = None,
+    ) -> None:
         manifest_path = self.EXPORTED_PARQUET_DIR / "manifest.csv"
+        tags = self._infer_factor_tags(
+            self.target_task if isinstance(self.target_task, FactorTask) else None,
+            extra_tags=(review_metadata or {}).get("tags"),
+        )
         row = pd.DataFrame(
             [
                 {
@@ -132,6 +234,15 @@ class FactorFBWorkspace(FBWorkspace):
                     "hash": factor_hash,
                     "rows": len(df),
                     "non_null": int(df.iloc[:, 0].notna().sum()),
+                    "time_granularity": self._infer_time_granularity(df),
+                    "accepted": bool((review_metadata or {}).get("accepted", False)),
+                    "logic_summary": (review_metadata or {}).get("logic_summary")
+                    or (
+                        self.target_task.factor_description
+                        if isinstance(self.target_task, FactorTask)
+                        else ""
+                    ),
+                    "tags": json.dumps(tags, ensure_ascii=False),
                     "latest_path": str(latest_path),
                     "workspace_path": str(self.workspace_path),
                     "updated_at": datetime.now().isoformat(timespec="seconds"),
@@ -146,7 +257,7 @@ class FactorFBWorkspace(FBWorkspace):
             manifest = row
         manifest.sort_values("factor_name").to_csv(manifest_path, index=False)
 
-    def _export_factor_dataframe(self, df: pd.DataFrame) -> None:
+    def _export_factor_dataframe(self, df: pd.DataFrame, review_metadata: dict[str, Any] | None = None) -> None:
         if df is None or df.empty:
             return
 
@@ -159,19 +270,40 @@ class FactorFBWorkspace(FBWorkspace):
             try:
                 existing_df = pd.read_parquet(latest_path)
                 if self._hash_factor_dataframe(existing_df) == current_hash:
-                    self._update_factor_manifest(factor_name, latest_path, df, current_hash)
+                    self._write_factor_metadata(factor_name, latest_path, df, current_hash, review_metadata)
+                    self._update_factor_manifest(factor_name, latest_path, df, current_hash, review_metadata)
                     return
             except Exception:
                 # If the previous parquet cannot be read, overwrite it with the current successful output.
                 pass
 
         df.to_parquet(latest_path, engine="pyarrow")
-        self._update_factor_manifest(factor_name, latest_path, df, current_hash)
+        self._write_factor_metadata(factor_name, latest_path, df, current_hash, review_metadata)
+        self._update_factor_manifest(factor_name, latest_path, df, current_hash, review_metadata)
 
         if self._env_flag("FACTOR_EXPORT_KEEP_SNAPSHOTS"):
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             snapshot_path = self.EXPORTED_PARQUET_DIR / f"{timestamp}__{factor_name}.parquet"
             df.to_parquet(snapshot_path, engine="pyarrow")
+
+    def export_reviewed_factor(
+        self,
+        df: pd.DataFrame,
+        *,
+        accepted: bool,
+        logic_summary: str | None = None,
+        tags: list[str] | None = None,
+        review_notes: str | None = None,
+        **extra_review_metadata: Any,
+    ) -> None:
+        review_metadata = {
+            "accepted": accepted,
+            "logic_summary": logic_summary,
+            "tags": tags or [],
+            "review_notes": review_notes,
+        }
+        review_metadata.update(extra_review_metadata)
+        self._export_factor_dataframe(df, review_metadata=review_metadata)
 
     @cache_with_pickle(hash_func)
     def execute(self, data_type: str = "Debug") -> Tuple[str, pd.DataFrame]:
@@ -265,7 +397,6 @@ class FactorFBWorkspace(FBWorkspace):
             if workspace_output_file_path.exists() and execution_success:
                 try:
                     executed_factor_value_dataframe = pd.read_hdf(workspace_output_file_path)
-                    self._export_factor_dataframe(executed_factor_value_dataframe)
                     execution_feedback += self.FB_OUTPUT_FILE_FOUND
                 except Exception as e:
                     execution_feedback += f"Error found when reading hdf file: {e}"[:1000]

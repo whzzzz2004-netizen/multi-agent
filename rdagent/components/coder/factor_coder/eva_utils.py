@@ -1,5 +1,7 @@
 import io
 import json
+import re
+from pathlib import Path
 from abc import abstractmethod
 from typing import Dict, Tuple
 
@@ -76,6 +78,10 @@ class FactorCodeEvaluator(FactorEvaluator):
     ):
         factor_information = target_task.get_task_information()
         code = implementation.all_codes
+        leakage_feedback, _ = FactorFutureLeakageEvaluator(self.scen).evaluate(
+            implementation=implementation,
+            gt_implementation=gt_implementation,
+        )
 
         system_prompt = T(".prompts:evaluator_code_feedback_v1_system").r(
             scenario=(
@@ -113,6 +119,8 @@ class FactorCodeEvaluator(FactorEvaluator):
             system_prompt=system_prompt,
             json_mode=False,
         )
+        if leakage_feedback:
+            critic_response = f"{leakage_feedback}\n{critic_response}"
 
         return critic_response, None
 
@@ -235,13 +243,140 @@ class FactorDatetimeDailyEvaluator(FactorEvaluator):
                 False,
             )
 
-        time_diff = pd.to_datetime(gen_df.index.get_level_values("datetime")).to_series().diff().dropna().unique()
-        if pd.Timedelta(minutes=1) in time_diff:
+        datetime_index = pd.to_datetime(gen_df.index.get_level_values("datetime"))
+        time_diff = datetime_index.to_series().diff().dropna()
+        positive_diff = time_diff[time_diff > pd.Timedelta(0)].unique()
+
+        if len(positive_diff) == 0:
+            return "The generated dataframe has a valid datetime index, but its granularity cannot be inferred.", True
+
+        min_step = min(positive_diff)
+        if min_step <= pd.Timedelta(minutes=1):
             return (
-                "The generated dataframe is not daily. The implementation is definitely wrong. Please check the implementation.",
+                "The generated dataframe is minute-level. This pipeline expects daily factor outputs even when the input data is minute-level. "
+                "Aggregate the minute data into one daily factor value per instrument.",
                 False,
             )
-        return "The generated dataframe is daily.", True
+        if min_step >= pd.Timedelta(days=1):
+            return "The generated dataframe is daily-level, which is correct.", True
+        return (
+            f"The generated dataframe uses an unsupported datetime granularity ({min_step}). "
+            "Please output one daily factor value per instrument.",
+            False,
+        )
+
+
+class FactorFutureLeakageEvaluator(FactorEvaluator):
+    _PATTERNS = [
+        (
+            re.compile(r"\.shift\(\s*-\d+", re.IGNORECASE),
+            "critic 1: The code uses a negative shift, which is a direct future-information leak. Only use current or past observations.",
+        ),
+        (
+            re.compile(r"\.pct_change\(\s*-\d+|periods\s*=\s*-\d+", re.IGNORECASE),
+            "critic 2: The code computes returns with a negative lookback, which leaks future prices into the factor.",
+        ),
+        (
+            re.compile(r"\.diff\(\s*-\d+", re.IGNORECASE),
+            "critic 3: The code uses negative diff periods, which relies on future rows and causes time leakage.",
+        ),
+        (
+            re.compile(r"center\s*=\s*True", re.IGNORECASE),
+            "critic 4: The code uses centered rolling windows, which mix future observations into the current timestamp.",
+        ),
+        (
+            re.compile(r"\.bfill\(|fillna\(\s*method\s*=\s*[\"']bfill[\"']", re.IGNORECASE),
+            "critic 5: The code backward-fills missing values, which can propagate future information to earlier timestamps.",
+        ),
+    ]
+
+    def evaluate(
+        self,
+        implementation: Workspace,
+        gt_implementation: Workspace = None,
+    ) -> Tuple[str, object]:
+        code = implementation.all_codes or ""
+        critics = [message for pattern, message in self._PATTERNS if pattern.search(code)]
+        if critics:
+            return "\n".join(critics), False
+        return "No obvious future-information leakage pattern was found in the code review.", True
+
+
+def _get_daily_label_from_data_folder(data_folder: Path) -> pd.Series:
+    daily_path = data_folder / "daily_pv.h5"
+    df = pd.read_hdf(daily_path, key="data").sort_index()
+    close = pd.to_numeric(df["$close"], errors="coerce")
+    label = close.groupby(level="instrument").pct_change().groupby(level="instrument").shift(-1)
+    label.name = "label_next_return"
+    return label
+
+
+def _mean_cross_sectional_ic(factor_df: pd.DataFrame, label: pd.Series) -> float:
+    if factor_df is None or factor_df.empty:
+        return float("nan")
+    factor_series = pd.to_numeric(factor_df.iloc[:, 0], errors="coerce")
+    factor_series.name = "factor"
+    merged = pd.concat([factor_series, label], axis=1, join="inner").dropna()
+    if merged.empty:
+        return float("nan")
+    daily_ic = merged.groupby(level="datetime").apply(lambda x: x["factor"].corr(x["label_next_return"]))
+    daily_ic = pd.to_numeric(daily_ic, errors="coerce").dropna()
+    if daily_ic.empty:
+        return float("nan")
+    return float(daily_ic.mean())
+
+
+def evaluate_factor_ic_from_workspace(
+    implementation: Workspace,
+    *,
+    data_type: str = "Debug",
+) -> tuple[str, float | None]:
+    try:
+        _, gen_df = implementation.execute(data_type)
+    except Exception as exc:  # noqa: BLE001
+        return f"IC evaluation failed because factor execution raised an exception: {exc}", None
+    if gen_df is None or gen_df.empty:
+        return "IC evaluation skipped because no valid factor dataframe was generated.", None
+
+    data_folder = (
+        Path(FACTOR_COSTEER_SETTINGS.data_folder_debug)
+        if data_type == "Debug"
+        else Path(FACTOR_COSTEER_SETTINGS.data_folder)
+    )
+    try:
+        label = _get_daily_label_from_data_folder(data_folder)
+        ic = _mean_cross_sectional_ic(gen_df, label)
+    except Exception as exc:  # noqa: BLE001
+        return f"IC evaluation failed while preparing labels or computing correlation: {exc}", None
+
+    if pd.isna(ic):
+        return (
+            "IC evaluation could not produce a valid value. The factor may have too few aligned daily observations "
+            "or no cross-sectional variation.",
+            None,
+        )
+
+    threshold = FACTOR_COSTEER_SETTINGS.min_abs_ic
+    if abs(ic) >= threshold:
+        return f"The factor has mean daily IC={ic:.6f}, which passes the minimum absolute IC threshold {threshold:.4f}.", ic
+    return (
+        f"The factor has mean daily IC={ic:.6f}, which is below the minimum absolute IC threshold {threshold:.4f}. "
+        "Revise the factor logic or aggregation method.",
+        ic,
+    )
+
+
+class FactorICEvaluator(FactorEvaluator):
+    def evaluate(
+        self,
+        implementation: Workspace,
+        gt_implementation: Workspace = None,
+        data_type: str = "Debug",
+    ) -> Tuple[str, object]:
+        feedback, ic = evaluate_factor_ic_from_workspace(implementation, data_type=data_type)
+        if ic is None:
+            return feedback, False
+        return feedback, abs(ic) >= FACTOR_COSTEER_SETTINGS.min_abs_ic
 
 
 class FactorRowCountEvaluator(FactorEvaluator):
@@ -419,6 +554,21 @@ class FactorValueEvaluator(FactorEvaluator):
         feedback_str, inf_evaluate_res = FactorInfEvaluator(self.scen).evaluate(implementation, gt_implementation)
         conclusions.append(feedback_str)
 
+        feedback_str, leakage_check_result = FactorFutureLeakageEvaluator(self.scen).evaluate(
+            implementation, gt_implementation
+        )
+        conclusions.append(feedback_str)
+
+        if version == 1:
+            feedback_str, ic_check_result = FactorICEvaluator(self.scen).evaluate(
+                implementation,
+                gt_implementation,
+                data_type="Debug",
+            )
+            conclusions.append(feedback_str)
+        else:
+            ic_check_result = None
+
         # Check if the index of the dataframe is ("datetime", "instrument")
         feedback_str, _ = FactorOutputFormatEvaluator(self.scen).evaluate(implementation, gt_implementation)
         conclusions.append(feedback_str)
@@ -468,6 +618,8 @@ class FactorValueEvaluator(FactorEvaluator):
             or output_format_result is False
             or daily_check_result is False
             or inf_evaluate_res is False
+            or leakage_check_result is False
+            or ic_check_result is False
         ):
             decision_from_value_check = False
         else:

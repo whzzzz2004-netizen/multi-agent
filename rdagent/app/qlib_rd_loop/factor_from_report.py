@@ -7,6 +7,8 @@ import fire
 
 from rdagent.app.qlib_rd_loop.conf import FACTOR_FROM_REPORT_PROP_SETTING
 from rdagent.app.qlib_rd_loop.factor import FactorRDLoop
+from rdagent.components.coder.factor_coder.config import FACTOR_COSTEER_SETTINGS
+from rdagent.components.coder.factor_coder.eva_utils import evaluate_factor_ic_from_workspace
 from rdagent.components.document_reader.document_reader import (
     extract_first_page_screenshot_from_pdf,
     load_and_process_pdfs_by_langchain,
@@ -91,6 +93,8 @@ def extract_hypothesis_and_exp_from_reports(report_file_path: str) -> QlibFactor
     report_content = "\n".join(docs_dict.values())
     hypothesis = generate_hypothesis(factor_result, report_content)
     exp.hypothesis = hypothesis
+    exp.source_report_path = str(Path(report_file_path).resolve())
+    exp.source_report_title = Path(report_file_path).stem
     return exp
 
 
@@ -138,6 +142,96 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
         exp = self.coder.develop(prev_out["direct_exp_gen"])
         logger.log_object(exp.sub_workspace_list, tag="coder result")
         return exp
+
+    def record(self, prev_out: dict[str, Any]):
+        feedback = prev_out["feedback"]
+        exp = prev_out.get("running") or prev_out.get("coding") or prev_out.get("direct_exp_gen")
+        exported_count = 0
+        if exp is not None and getattr(exp, "prop_dev_feedback", None) is not None:
+            source_report_path = getattr(exp, "source_report_path", None)
+            source_report_title = getattr(exp, "source_report_title", None)
+            for task, workspace, task_feedback in zip(exp.sub_tasks, exp.sub_workspace_list, exp.prop_dev_feedback):
+                if workspace is None or task_feedback is None or not bool(task_feedback.final_decision):
+                    continue
+                try:
+                    _, df = workspace.execute("All")
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning(
+                        f"Failed to reload report-derived factor dataframe for reviewed export: "
+                        f"task={task.factor_name}; {exc}"
+                    )
+                    continue
+                if df is None or df.empty:
+                    continue
+                ic_feedback, full_sample_ic = evaluate_factor_ic_from_workspace(workspace, data_type="All")
+                if full_sample_ic is None or abs(full_sample_ic) < FACTOR_COSTEER_SETTINGS.min_abs_ic:
+                    logger.info(
+                        f"Skip reviewed export for report-derived factor {task.factor_name} because full-sample IC "
+                        f"did not pass. {ic_feedback}"
+                    )
+                    continue
+                logic_summary = task.factor_description
+                review_notes = "\n".join(
+                    part
+                    for part in [task_feedback.execution, task_feedback.return_checking, task_feedback.code, ic_feedback]
+                    if part
+                )
+                tags = _infer_report_factor_registry_tags(task, task_feedback)
+                workspace.export_reviewed_factor(
+                    df,
+                    accepted=True,
+                    logic_summary=logic_summary,
+                    tags=tags,
+                    review_notes=review_notes,
+                    ic_score=full_sample_ic,
+                    source_report_path=source_report_path,
+                    source_report_title=source_report_title,
+                )
+                exported_count += 1
+
+        self.trace.sync_dag_parent_and_hist((exp, feedback), prev_out[self.LOOP_IDX_KEY])
+        logger.info(
+            f"Factor report loop recorded. Accepted reviewed factor exports: {exported_count}. "
+            f"Source report: {getattr(exp, 'source_report_title', 'unknown') if exp is not None else 'unknown'}."
+        )
+
+
+def _infer_report_factor_registry_tags(task, feedback) -> list[str]:
+    content = " ".join(
+        [
+            getattr(task, "factor_name", "") or "",
+            getattr(task, "factor_description", "") or "",
+            getattr(task, "factor_formulation", "") or "",
+            str(getattr(task, "variables", {}) or {}),
+            getattr(feedback, "code", "") or "",
+        ]
+    ).lower()
+    tags: set[str] = {"literature_factor", "report_extracted"}
+    keyword_to_tag = {
+        "momentum": "momentum",
+        "reversal": "reversal",
+        "volatility": "volatility",
+        "volume": "volume",
+        "turnover": "turnover",
+        "vwap": "vwap",
+        "spread": "liquidity",
+        "liquidity": "liquidity",
+        "bid": "quote",
+        "ask": "quote",
+        "minute": "minute_input",
+        "intraday": "minute_input",
+        "microstructure": "microstructure",
+        "gap": "gap",
+        "trend": "trend",
+        "acceleration": "acceleration",
+    }
+    for keyword, tag in keyword_to_tag.items():
+        if keyword in content:
+            tags.add(tag)
+    if "future-information leak" not in content and "time leakage" not in content:
+        tags.add("leakage_checked")
+    tags.add("ic_passed")
+    return sorted(tags)
 
 
 def main(report_folder=None, path=None, all_duration=None, checkout=True):
