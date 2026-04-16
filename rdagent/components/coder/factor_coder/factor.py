@@ -91,6 +91,7 @@ class FactorFBWorkspace(FBWorkspace):
     FB_OUTPUT_FILE_NOT_FOUND = "\nExpected output file not found."
     FB_OUTPUT_FILE_FOUND = "\nExpected output file found."
     EXPORTED_PARQUET_DIR = Path.cwd() / "git_ignore_folder" / "factor_outputs"
+    LEADERBOARD_PATH = EXPORTED_PARQUET_DIR / "leaderboard.csv"
 
     def __init__(
         self,
@@ -176,9 +177,9 @@ class FactorFBWorkspace(FBWorkspace):
         for keyword, tag in keyword_to_tag.items():
             if keyword in content:
                 tags.add(tag)
-        if "minute_quote_sample.h5" in content:
+        if "minute_quote.h5" in content:
             tags.update({"minute_input", "quote"})
-        if "minute_pv_sample.h5" in content:
+        if "minute_pv.h5" in content:
             tags.add("minute_input")
         if "daily_pv.h5" in content:
             tags.add("daily_input")
@@ -236,6 +237,7 @@ class FactorFBWorkspace(FBWorkspace):
                     "non_null": int(df.iloc[:, 0].notna().sum()),
                     "time_granularity": self._infer_time_granularity(df),
                     "accepted": bool((review_metadata or {}).get("accepted", False)),
+                    "ic_score": (review_metadata or {}).get("ic_score"),
                     "logic_summary": (review_metadata or {}).get("logic_summary")
                     or (
                         self.target_task.factor_description
@@ -243,6 +245,10 @@ class FactorFBWorkspace(FBWorkspace):
                         else ""
                     ),
                     "tags": json.dumps(tags, ensure_ascii=False),
+                    "source_type": (review_metadata or {}).get("source_type", "agent_generated"),
+                    "source_report_title": (review_metadata or {}).get("source_report_title"),
+                    "source_report_path": (review_metadata or {}).get("source_report_path"),
+                    "review_notes": (review_metadata or {}).get("review_notes"),
                     "latest_path": str(latest_path),
                     "workspace_path": str(self.workspace_path),
                     "updated_at": datetime.now().isoformat(timespec="seconds"),
@@ -256,6 +262,43 @@ class FactorFBWorkspace(FBWorkspace):
         else:
             manifest = row
         manifest.sort_values("factor_name").to_csv(manifest_path, index=False)
+        self._update_factor_leaderboard(manifest)
+
+    def _update_factor_leaderboard(self, manifest: pd.DataFrame) -> None:
+        if manifest.empty:
+            return
+        leaderboard = manifest.copy()
+        if "accepted" in leaderboard.columns:
+            leaderboard = leaderboard[leaderboard["accepted"].fillna(False).astype(bool)]
+        if "ic_score" in leaderboard.columns:
+            leaderboard["ic_score"] = pd.to_numeric(leaderboard["ic_score"], errors="coerce")
+        else:
+            leaderboard["ic_score"] = pd.NA
+        if "updated_at" in leaderboard.columns:
+            leaderboard["updated_at"] = pd.to_datetime(leaderboard["updated_at"], errors="coerce")
+        preferred_columns = [
+            "rank",
+            "factor_name",
+            "ic_score",
+            "logic_summary",
+            "tags",
+            "source_type",
+            "source_report_title",
+            "time_granularity",
+            "latest_path",
+            "workspace_path",
+            "updated_at",
+        ]
+        leaderboard = leaderboard.sort_values(
+            by=["ic_score", "updated_at", "factor_name"],
+            ascending=[False, False, True],
+            na_position="last",
+        ).reset_index(drop=True)
+        leaderboard.insert(0, "rank", leaderboard.index + 1)
+        existing_columns = [column for column in preferred_columns if column in leaderboard.columns]
+        remaining_columns = [column for column in leaderboard.columns if column not in existing_columns]
+        leaderboard = leaderboard[existing_columns + remaining_columns]
+        leaderboard.to_csv(self.LEADERBOARD_PATH, index=False)
 
     def _export_factor_dataframe(self, df: pd.DataFrame, review_metadata: dict[str, Any] | None = None) -> None:
         if df is None or df.empty:
@@ -301,6 +344,7 @@ class FactorFBWorkspace(FBWorkspace):
             "logic_summary": logic_summary,
             "tags": tags or [],
             "review_notes": review_notes,
+            "source_type": "agent_generated",
         }
         review_metadata.update(extra_review_metadata)
         self._export_factor_dataframe(df, review_metadata=review_metadata)

@@ -11,6 +11,19 @@ from jinja2 import Environment, StrictUndefined
 from rdagent.components.coder.factor_coder.config import FACTOR_COSTEER_SETTINGS
 from rdagent.utils.env import QTDockerEnv
 
+REAL_MINUTE_PV_FILENAME = "minute_pv.h5"
+REAL_MINUTE_QUOTE_FILENAME = "minute_quote.h5"
+
+
+def _minute_day_count(path: Path) -> int:
+    if not path.exists():
+        return 0
+    df = pd.read_hdf(path, key="data")
+    if df.empty or "datetime" not in df.index.names:
+        return 0
+    dt = pd.to_datetime(df.index.get_level_values("datetime"))
+    return int(dt.normalize().nunique())
+
 
 def _minute_timestamps_for_day(day: pd.Timestamp) -> pd.DatetimeIndex:
     morning = pd.date_range(day.normalize() + pd.Timedelta(hours=9, minutes=30), periods=120, freq="min")
@@ -116,21 +129,28 @@ def _generate_minute_sample_data(
 
 def ensure_sample_minute_data_files() -> None:
     folder_specs = [
-        (Path(FACTOR_COSTEER_SETTINGS.data_folder), 30, 20),
-        (Path(FACTOR_COSTEER_SETTINGS.data_folder_debug), 5, 5),
+        (Path(FACTOR_COSTEER_SETTINGS.data_folder), 252, 80),
+        (Path(FACTOR_COSTEER_SETTINGS.data_folder_debug), 60, 20),
     ]
     for folder, max_days, max_instruments in folder_specs:
         daily_path = folder / "daily_pv.h5"
-        minute_pv_path = folder / "minute_pv_sample.h5"
-        minute_quote_path = folder / "minute_quote_sample.h5"
+        real_minute_pv_path = folder / REAL_MINUTE_PV_FILENAME
+        real_minute_quote_path = folder / REAL_MINUTE_QUOTE_FILENAME
         if not daily_path.exists():
             continue
-        if minute_pv_path.exists() and minute_quote_path.exists():
+
+        real_ready = (
+            real_minute_pv_path.exists()
+            and real_minute_quote_path.exists()
+            and _minute_day_count(real_minute_pv_path) >= max_days
+        )
+        if real_ready:
             continue
+
         _generate_minute_sample_data(
             daily_path=daily_path,
-            minute_pv_path=minute_pv_path,
-            minute_quote_path=minute_quote_path,
+            minute_pv_path=real_minute_pv_path,
+            minute_quote_path=real_minute_quote_path,
             max_days=max_days,
             max_instruments=max_instruments,
         )
@@ -280,6 +300,15 @@ def resolve_factor_data_mode() -> str:
 
 def factor_mode_instruction(mode: str | None = None) -> str:
     selected_mode = resolve_factor_data_mode() if mode is None else mode
+    data_folder = Path(FACTOR_COSTEER_SETTINGS.data_folder_debug)
+    has_real_minute_files = (data_folder / REAL_MINUTE_PV_FILENAME).exists() and (
+        data_folder / REAL_MINUTE_QUOTE_FILENAME
+    ).exists()
+    minute_source_sentence = (
+        f"Prefer real minute-level source files such as {REAL_MINUTE_PV_FILENAME} and {REAL_MINUTE_QUOTE_FILENAME}."
+        if has_real_minute_files
+        else f"Use minute-level source files named {REAL_MINUTE_PV_FILENAME} and {REAL_MINUTE_QUOTE_FILENAME}."
+    )
     instructions = {
         "daily": (
             "Current factor mining mode: daily_factor.\n"
@@ -288,7 +317,8 @@ def factor_mode_instruction(mode: str | None = None) -> str:
         ),
         "minute": (
             "Current factor mining mode: minute_factor.\n"
-            "Prefer minute-level source files such as minute_pv_sample.h5 and minute_quote_sample.h5.\n"
+            + minute_source_sentence
+            + "\n"
             "You may aggregate intraday OHLCV and bid/ask information into one daily factor value per trading day and instrument.\n"
             "Do not output minute-level factor values."
         ),

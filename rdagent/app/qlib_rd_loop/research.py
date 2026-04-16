@@ -50,6 +50,8 @@ class FactorMiningLoop(FactorRDLoop):
     def __init__(self, *args, batch_size: int = 10, **kwargs):
         super().__init__(*args, **kwargs)
         self.batch_size = batch_size
+        # Count accepted exports instead of attempted tasks so the loop keeps
+        # mining until we have enough usable factors in the pool.
         self.mined_factor_count = 0
 
     async def direct_exp_gen(self, prev_out):
@@ -68,43 +70,69 @@ class FactorMiningLoop(FactorRDLoop):
             exp.sub_workspace_list = exp.sub_workspace_list[:remaining]
         return result
 
+    def _review_and_export_accepted_factors(self, exp) -> tuple[int, int]:
+        exported_count = 0
+        reviewed_count = 0
+        if exp is None or getattr(exp, "prop_dev_feedback", None) is None:
+            return exported_count, reviewed_count
+
+        for task, workspace, feedback in zip(exp.sub_tasks, exp.sub_workspace_list, exp.prop_dev_feedback):
+            reviewed_count += 1
+            if workspace is None or feedback is None or not bool(feedback.final_decision):
+                continue
+            try:
+                _, df = workspace.execute("All")
+            except Exception as exc:  # noqa: BLE001
+                logger.warning(f"Failed to reload factor dataframe for reviewed export: task={task.factor_name}; {exc}")
+                continue
+            if df is None or df.empty:
+                continue
+
+            ic_feedback, full_sample_ic = evaluate_factor_ic_from_workspace(workspace, data_type="All")
+            if full_sample_ic is None or abs(full_sample_ic) < FACTOR_COSTEER_SETTINGS.min_abs_ic:
+                logger.info(
+                    f"Skip reviewed export for factor {task.factor_name} because full-sample IC did not pass. "
+                    f"{ic_feedback}"
+                )
+                continue
+
+            logic_summary = task.factor_description
+            review_notes = "\n".join(
+                part for part in [feedback.execution, feedback.return_checking, feedback.code, ic_feedback] if part
+            )
+            tags = _infer_factor_registry_tags(task, feedback)
+            tags.append("ic_passed")
+            tags = sorted(set(tags))
+            workspace.export_reviewed_factor(
+                df,
+                accepted=True,
+                logic_summary=logic_summary,
+                tags=tags,
+                review_notes=review_notes,
+                ic_score=full_sample_ic,
+            )
+            exported_count += 1
+            logger.info(
+                f"Accepted factor exported immediately: {task.factor_name} "
+                f"(IC={full_sample_ic:.6f}, progress={self.mined_factor_count + exported_count}/{self.batch_size})"
+            )
+
+        return exported_count, reviewed_count
+
+    def coding(self, prev_out: dict[str, Any]):
+        exp = self.coder.develop(prev_out["direct_exp_gen"]["exp_gen"])
+        exported_count, reviewed_count = self._review_and_export_accepted_factors(exp)
+        exp.accepted_exported_count = exported_count
+        exp.reviewed_factor_count = reviewed_count
+        exp.accepted_exported_immediately = True
+        self.mined_factor_count += exported_count
+        logger.log_object(exp.sub_workspace_list, tag="coder result")
+        return exp
+
     def record(self, prev_out):
         exp = prev_out.get("coding") or prev_out.get("direct_exp_gen", {}).get("exp_gen")
-        exported_count = 0
-        if exp is not None and getattr(exp, "prop_dev_feedback", None) is not None:
-            for task, workspace, feedback in zip(exp.sub_tasks, exp.sub_workspace_list, exp.prop_dev_feedback):
-                if workspace is None or feedback is None or not bool(feedback.final_decision):
-                    continue
-                try:
-                    _, df = workspace.execute("All")
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning(f"Failed to reload factor dataframe for reviewed export: task={task.factor_name}; {exc}")
-                    continue
-                if df is None or df.empty:
-                    continue
-                ic_feedback, full_sample_ic = evaluate_factor_ic_from_workspace(workspace, data_type="All")
-                if full_sample_ic is None or abs(full_sample_ic) < FACTOR_COSTEER_SETTINGS.min_abs_ic:
-                    logger.info(
-                        f"Skip reviewed export for factor {task.factor_name} because full-sample IC did not pass. "
-                        f"{ic_feedback}"
-                    )
-                    continue
-                logic_summary = task.factor_description
-                review_notes = "\n".join(
-                    part for part in [feedback.execution, feedback.return_checking, feedback.code, ic_feedback] if part
-                )
-                tags = _infer_factor_registry_tags(task, feedback)
-                tags.append("ic_passed")
-                tags = sorted(set(tags))
-                workspace.export_reviewed_factor(
-                    df,
-                    accepted=True,
-                    logic_summary=logic_summary,
-                    tags=tags,
-                    review_notes=review_notes,
-                    ic_score=full_sample_ic,
-                )
-                exported_count += 1
+        exported_count = int(getattr(exp, "accepted_exported_count", 0)) if exp is not None else 0
+        reviewed_count = int(getattr(exp, "reviewed_factor_count", 0)) if exp is not None else 0
         feedback = HypothesisFeedback(
             reason=(
                 "Factor mining mode finished after coding/evaluation. "
@@ -117,12 +145,12 @@ class FactorMiningLoop(FactorRDLoop):
         )
         logger.log_object(feedback, tag="factor mining feedback")
         if exp is not None:
-            self.mined_factor_count += len(exp.sub_tasks)
             self.trace.sync_dag_parent_and_hist((exp, feedback), prev_out[self.LOOP_IDX_KEY])
         logger.info(
             f"Factor mining loop recorded. Backtest step was skipped by design. "
             f"Batch progress: {self.mined_factor_count}/{self.batch_size}. "
-            f"Accepted factor exports: {exported_count}."
+            f"Reviewed factors this round: {reviewed_count}. "
+            f"Accepted factor exports this round: {exported_count}."
         )
 
 

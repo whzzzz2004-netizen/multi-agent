@@ -85,20 +85,36 @@ class LiteLLMAPIBackend(APIBackend):
                 f"{LogColors.MAGENTA}Creating embedding{LogColors.END} for: {input_content_list}",
                 tag="debug_litellm_emb",
             )
-        if api_base and "dashscope.aliyuncs.com" in api_base and model_name.startswith("openai/"):
-            return self._create_dashscope_embedding(input_content_list, model_name, api_base, api_key)
+        batch_size = self._get_embedding_batch_size(model_name=model_name, api_base=api_base)
+        content_to_embedding_dict = {}
+        for batch in [input_content_list[i : i + batch_size] for i in range(0, len(input_content_list), batch_size)]:
+            if api_base and "dashscope.aliyuncs.com" in api_base and model_name.startswith("openai/"):
+                response_list = self._create_dashscope_embedding(batch, model_name, api_base, api_key)
+            else:
+                response = embedding(
+                    model=model_name,
+                    input=batch,
+                    # DashScope's OpenAI-compatible embedding endpoint rejects the
+                    # implicit/default encoding format from the OpenAI SDK path.
+                    encoding_format="float",
+                    api_base=api_base,
+                    api_key=api_key,
+                )
+                response_list = [data["embedding"] for data in response.data]
+            for idx, content in enumerate(batch):
+                content_to_embedding_dict[content] = response_list[idx]
+        return [content_to_embedding_dict[content] for content in input_content_list]
 
-        response = embedding(
-            model=model_name,
-            input=input_content_list,
-            # DashScope's OpenAI-compatible embedding endpoint rejects the
-            # implicit/default encoding format from the OpenAI SDK path.
-            encoding_format="float",
-            api_base=api_base,
-            api_key=api_key,
-        )
-        response_list = [data["embedding"] for data in response.data]
-        return response_list
+    @staticmethod
+    def _get_embedding_batch_size(model_name: str, api_base: str | None) -> int:
+        default_batch_size = max(1, LITELLM_SETTINGS.embedding_max_str_num)
+        normalized_model_name = model_name.split("/", 1)[-1] if "/" in model_name else model_name
+        if api_base and "dashscope.aliyuncs.com" in api_base:
+            # DashScope's text-embedding-v3/v4 OpenAI-compatible endpoint only
+            # accepts up to 10 strings per request.
+            if normalized_model_name in {"text-embedding-v3", "text-embedding-v4"}:
+                return min(default_batch_size, 10)
+        return default_batch_size
 
     @staticmethod
     def _trim_dashscope_embedding_inputs(input_content_list: list[str], max_chars: int) -> list[str]:

@@ -11,8 +11,8 @@ NOTE: **key is always "data" for all hdf5 files **.
 | Filename       | Description                                                      |
 | -------------- | -----------------------------------------------------------------|
 | "daily_pv.h5"  | Adjusted daily price and volume data.                            |
-| "minute_pv_sample.h5"  | Synthetic minute-level OHLCV/VWAP sample derived from daily data for pipeline testing. |
-| "minute_quote_sample.h5"  | Synthetic minute-level bid/ask and size sample derived from daily data for pipeline testing. |
+| "minute_pv.h5"  | Minute-level OHLCV/VWAP data used by the pipeline. |
+| "minute_quote.h5"  | Minute-level bid/ask and size data used by the pipeline. |
 
 
 # For different data, We have some basic knowledge for them
@@ -25,7 +25,7 @@ $low: low price of the stock on that day.
 $volume: volume of the stock on that day.
 $factor: factor value of the stock on that day.
 
-## Minute price and volume sample data
+## Minute price and volume data
 $open: minute open price.
 $close: minute close price.
 $high: minute high price.
@@ -33,7 +33,11 @@ $low: minute low price.
 $volume: minute traded volume.
 $vwap: minute volume weighted average price.
 
-## Minute quote sample data
+The expected schema for `minute_pv.h5` is:
+- MultiIndex: `datetime`, `instrument`
+- Columns: `$open`, `$close`, `$high`, `$low`, `$volume`, `$vwap`
+
+## Minute quote data
 $bid1: best bid price at that minute.
 $ask1: best ask price at that minute.
 $bid1_size: best bid size at that minute.
@@ -41,4 +45,6 @@ $ask1_size: best ask size at that minute.
 $mid_price: midpoint price computed from bid1 and ask1.
 $spread_bps: bid-ask spread in basis points.
 
-These minute files are synthetic samples generated from the daily dataset, intended to let the factor-mining pipeline test minute-level and quote-style logic. They are not true exchange-grade market microstructure data.
+The expected schema for `minute_quote.h5` is:
+- MultiIndex: `datetime`, `instrument`
+- Columns: `$bid1`, `$ask1`, `$bid1_size`, `$ask1_size`, `$mid_price`, `$spread_bps`

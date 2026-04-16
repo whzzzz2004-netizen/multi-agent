@@ -9,6 +9,7 @@ This will
 import os
 import sys
 from contextlib import contextmanager
+from pathlib import Path
 
 from dotenv import load_dotenv
 
@@ -31,6 +32,7 @@ from rdagent.app.general_model.general_model import (
 from rdagent.app.qlib_rd_loop.factor import main as fin_factor
 from rdagent.app.qlib_rd_loop.factor_from_report import main as fin_factor_report
 from rdagent.app.qlib_rd_loop.model import main as fin_model
+from rdagent.app.qlib_rd_loop.paper_improvement import main as ingest_factor_improvement_papers
 from rdagent.app.qlib_rd_loop.quant import main as fin_quant
 from rdagent.app.qlib_rd_loop.research import backtest_model_library as fin_backtest_model_library
 from rdagent.app.qlib_rd_loop.research import list_model_library as fin_list_model_library
@@ -41,10 +43,14 @@ from rdagent.app.qlib_rd_loop.research import model_from_pool as fin_model_from_
 from rdagent.app.utils.health_check import health_check
 from rdagent.app.utils.info import collect_info
 from rdagent.log.mle_summary import grade_summary as grade_summary
+from rdagent.scenarios.qlib.knowledge_router import render_route_map
 
 app = typer.Typer()
 daily_factor_app = typer.Typer()
 minute_factor_app = typer.Typer()
+paper_factor_app = typer.Typer()
+DEFAULT_PAPER_REPORT_FOLDER = str(Path.cwd() / "papers" / "inbox")
+DEFAULT_FACTOR_IMPROVEMENT_FOLDER = str(Path.cwd() / "papers" / "factor_improvement")
 
 CheckoutOption = Annotated[bool, typer.Option("--checkout/--no-checkout", "-c/-C")]
 CheckEnvOption = Annotated[bool, typer.Option("--check-env/--no-check-env", "-e/-E")]
@@ -206,7 +212,7 @@ def daily_factor_cli(
     all_duration: Optional[str] = None,
     checkout: CheckoutOption = True,
     base_features_path: Optional[str] = None,
-    batch_size: int = 1,
+    batch_size: int = 10,
 ):
     """Mine factors from daily data with the simplest default path."""
     with _temporary_env(RDAGENT_FACTOR_DATA_MODE="daily"):
@@ -229,7 +235,7 @@ def minute_factor_cli(
     all_duration: Optional[str] = None,
     checkout: CheckoutOption = True,
     base_features_path: Optional[str] = None,
-    batch_size: int = 1,
+    batch_size: int = 10,
 ):
     """Mine daily factors from minute and quote sample data."""
     with _temporary_env(RDAGENT_FACTOR_DATA_MODE="minute"):
@@ -252,7 +258,7 @@ def daily_factor_entry(
     all_duration: Optional[str] = None,
     checkout: CheckoutOption = True,
     base_features_path: Optional[str] = None,
-    batch_size: int = 1,
+    batch_size: int = 10,
 ):
     daily_factor_cli(
         path=path,
@@ -273,7 +279,7 @@ def minute_factor_entry(
     all_duration: Optional[str] = None,
     checkout: CheckoutOption = True,
     base_features_path: Optional[str] = None,
-    batch_size: int = 1,
+    batch_size: int = 10,
 ):
     minute_factor_cli(
         path=path,
@@ -283,6 +289,24 @@ def minute_factor_entry(
         checkout=checkout,
         base_features_path=base_features_path,
         batch_size=batch_size,
+    )
+
+
+@paper_factor_app.callback(invoke_without_command=True)
+def paper_factor_entry(
+    report_folder: str = typer.Option(
+        DEFAULT_PAPER_REPORT_FOLDER,
+        help="Folder containing PDF factor reports",
+    ),
+    path: Optional[str] = None,
+    all_duration: Optional[str] = None,
+    checkout: CheckoutOption = True,
+):
+    paper_factor_cli(
+        report_folder=report_folder,
+        path=path,
+        all_duration=all_duration,
+        checkout=checkout,
     )
 
 
@@ -362,6 +386,37 @@ def fin_factor_report_cli(
     checkout: CheckoutOption = True,
 ):
     fin_factor_report(report_folder=report_folder, path=path, all_duration=all_duration, checkout=checkout)
+
+
+@app.command(name="paper_factor")
+def paper_factor_cli(
+    report_folder: str = typer.Option(
+        DEFAULT_PAPER_REPORT_FOLDER,
+        help="Folder containing PDF factor reports",
+    ),
+    path: Optional[str] = None,
+    all_duration: Optional[str] = None,
+    checkout: CheckoutOption = True,
+):
+    fin_factor_report(report_folder=report_folder, path=path, all_duration=all_duration, checkout=checkout)
+
+
+@app.command(name="knowledge_map")
+def knowledge_map_cli() -> None:
+    """Show where each quant-factor workflow step looks for knowledge."""
+    typer.echo(render_route_map())
+
+
+@app.command(name="ingest_factor_papers")
+def ingest_factor_papers_cli(
+    report_folder: str = typer.Option(
+        DEFAULT_FACTOR_IMPROVEMENT_FOLDER,
+        help="Folder containing factor-improvement PDF papers",
+    ),
+) -> None:
+    """Ingest factor-improvement papers into the structured paper knowledge base."""
+    updated_count = ingest_factor_improvement_papers(report_folder=report_folder)
+    typer.echo(f"Ingested {updated_count} paper(s) into the factor-improvement knowledge base.")
 
 
 @app.command(name="general_model")

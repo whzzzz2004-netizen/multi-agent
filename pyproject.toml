@@ -34,6 +34,7 @@ requires-python = ">=3.10"
 [project.scripts]
 daily_factor = "rdagent.app.cli:daily_factor_app"
 minute_factor = "rdagent.app.cli:minute_factor_app"
+paper_factor = "rdagent.app.cli:paper_factor_app"
 rdagent = "rdagent.app.cli:app"
 
 [project.urls]

@@ -68,8 +68,8 @@ evolving_strategy_factor_implementation_v1_system: |-
       # Read the appropriate source file - all data files use key="data"
       # Examples:
       #   daily_pv.h5           -> daily OHLCV
-      #   minute_pv_sample.h5   -> minute OHLCV/VWAP sample
-      #   minute_quote_sample.h5 -> minute bid/ask sample
+      #   minute_pv.h5          -> minute OHLCV/VWAP
+      #   minute_quote.h5       -> minute bid/ask sample
       df = pd.read_hdf("daily_pv.h5", key="data")
 
       # Calculate your factor here

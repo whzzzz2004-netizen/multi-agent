@@ -9,6 +9,9 @@ from rdagent.core.proposal import Hypothesis, Scenario, Trace
 from rdagent.scenarios.qlib.experiment.factor_experiment import QlibFactorExperiment
 from rdagent.scenarios.qlib.experiment.model_experiment import QlibModelExperiment
 from rdagent.scenarios.qlib.experiment.quant_experiment import QlibQuantScenario
+from rdagent.scenarios.qlib.knowledge_router import (
+    build_factor_generation_knowledge_summary,
+)
 from rdagent.utils.agent.tpl import T
 
 QlibFactorHypothesis = Hypothesis
@@ -76,6 +79,7 @@ class QlibFactorHypothesisGen(FactorHypothesisGen):
             if exported_names
             else ""
         )
+        knowledge_brief = build_factor_generation_knowledge_summary()
 
         context_dict = {
             "hypothesis_and_feedback": hypothesis_and_feedback,
@@ -85,7 +89,9 @@ class QlibFactorHypothesisGen(FactorHypothesisGen):
                 if len(trace.hist) < 15
                 else "Now, you need to try factors that can achieve high IC (e.g., machine learning-based factors)."
             )
-            + existing_factor_hint,
+            + existing_factor_hint
+            + "\n\nKnowledge snippets you should actually use for factor generation:\n"
+            + knowledge_brief,
             "hypothesis_output_format": T("scenarios.qlib.prompts:factor_hypothesis_output_format").r(),
             "hypothesis_specification": T("scenarios.qlib.prompts:factor_hypothesis_specification").r(),
         }
@@ -136,6 +142,7 @@ class QlibFactorHypothesis2Experiment(FactorHypothesis2Experiment):
             if exported_names
             else None
         )
+        knowledge_brief = build_factor_generation_knowledge_summary()
 
         return {
             "target_hypothesis": str(hypothesis),
@@ -143,7 +150,9 @@ class QlibFactorHypothesis2Experiment(FactorHypothesis2Experiment):
             "hypothesis_and_feedback": hypothesis_and_feedback,
             "experiment_output_format": experiment_output_format,
             "target_list": exported_names,
-            "RAG": duplicate_guard,
+            "RAG": (duplicate_guard or "")
+            + "\n\nKnowledge snippets you should actually use when expanding the factor hypothesis:\n"
+            + knowledge_brief,
         }, True
 
     def convert_response(self, response: str, hypothesis: Hypothesis, trace: Trace) -> FactorExperiment:

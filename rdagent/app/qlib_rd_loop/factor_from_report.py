@@ -184,6 +184,7 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
                     tags=tags,
                     review_notes=review_notes,
                     ic_score=full_sample_ic,
+                    source_type="literature_report",
                     source_report_path=source_report_path,
                     source_report_title=source_report_title,
                 )
