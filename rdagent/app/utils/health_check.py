@@ -1,5 +1,6 @@
 import os
 import socket
+from pathlib import Path
 
 import docker
 import fire
@@ -92,6 +93,9 @@ def test_embedding(embedding_model, embedding_api_key, embedding_api_base):
 
 
 def env_check():
+    if not Path(".env").exists():
+        logger.warning("No .env file found in the project root. Run `rdagent init` to create one from .env.example.")
+
     if "BACKEND" not in os.environ:
         logger.warning(
             f"We did not find BACKEND in your configuration, please add it to your .env file. "
@@ -132,10 +136,48 @@ def env_check():
         logger.error(" One or more tests failed. Please check credentials or model support.")
 
 
+def check_workspace_files() -> None:
+    project_root = Path.cwd()
+    factor_data_dir = project_root / "git_ignore_folder" / "factor_implementation_source_data"
+    factor_data_debug_dir = project_root / "git_ignore_folder" / "factor_implementation_source_data_debug"
+    expected_dirs = [
+        project_root / "git_ignore_folder",
+        project_root / "git_ignore_folder" / "factor_outputs",
+        project_root / "git_ignore_folder" / "research_store" / "knowledge",
+        project_root / "papers" / "inbox",
+        project_root / "papers" / "factor_improvement",
+    ]
+    missing_dirs = [str(path) for path in expected_dirs if not path.exists()]
+    if missing_dirs:
+        logger.warning(
+            "Workspace folders are missing. Run `rdagent init` first. Missing: " + ", ".join(missing_dirs)
+        )
+    else:
+        logger.info("Workspace folder layout looks ready.")
+
+    expected_files = [
+        factor_data_dir / "daily_pv.h5",
+        factor_data_dir / "minute_pv.h5",
+        factor_data_dir / "minute_quote.h5",
+        factor_data_debug_dir / "daily_pv.h5",
+        factor_data_debug_dir / "minute_pv.h5",
+        factor_data_debug_dir / "minute_quote.h5",
+    ]
+    missing_files = [str(path) for path in expected_files if not path.exists()]
+    if missing_files:
+        logger.warning(
+            "Factor data files are missing. Run `rdagent init` to prepare bundled starter data. Missing: "
+            + ", ".join(missing_files)
+        )
+    else:
+        logger.info("Bundled factor data files are present.")
+
+
 def health_check(
     check_env: bool = True,
     check_docker: bool = True,
     check_ports: bool = True,
+    check_workspace: bool = True,
 ):
     """
     Run the RD-Agent health check:
@@ -159,6 +201,9 @@ def health_check(
     if check_ports:
         check_any = True
         check_and_list_free_ports()
+    if check_workspace:
+        check_any = True
+        check_workspace_files()
 
     if not check_any:
         logger.warning("⚠️ All health check items are disabled. Please enable at least one check.")

@@ -24,25 +24,6 @@ from typing import Optional
 import typer
 from typing_extensions import Annotated
 
-from rdagent.app.data_science.loop import main as data_science
-from rdagent.app.finetune.llm.loop import main as llm_finetune
-from rdagent.app.general_model.general_model import (
-    extract_models_and_implement as general_model,
-)
-from rdagent.app.qlib_rd_loop.factor import main as fin_factor
-from rdagent.app.qlib_rd_loop.factor_from_report import main as fin_factor_report
-from rdagent.app.qlib_rd_loop.model import main as fin_model
-from rdagent.app.qlib_rd_loop.paper_improvement import main as ingest_factor_improvement_papers
-from rdagent.app.qlib_rd_loop.quant import main as fin_quant
-from rdagent.app.qlib_rd_loop.research import backtest_model_library as fin_backtest_model_library
-from rdagent.app.qlib_rd_loop.research import list_model_library as fin_list_model_library
-from rdagent.app.qlib_rd_loop.research import main as fin_research
-from rdagent.app.qlib_rd_loop.research import lgbm_from_pool as fin_lgbm_from_pool
-from rdagent.app.qlib_rd_loop.research import mine_factors as fin_mine_factors
-from rdagent.app.qlib_rd_loop.research import model_from_pool as fin_model_from_pool
-from rdagent.app.utils.health_check import health_check
-from rdagent.app.utils.info import collect_info
-from rdagent.log.mle_summary import grade_summary as grade_summary
 from rdagent.scenarios.qlib.knowledge_router import render_route_map
 
 app = typer.Typer()
@@ -56,6 +37,7 @@ CheckoutOption = Annotated[bool, typer.Option("--checkout/--no-checkout", "-c/-C
 CheckEnvOption = Annotated[bool, typer.Option("--check-env/--no-check-env", "-e/-E")]
 CheckDockerOption = Annotated[bool, typer.Option("--check-docker/--no-check-docker", "-d/-D")]
 CheckPortsOption = Annotated[bool, typer.Option("--check-ports/--no-check-ports", "-p/-P")]
+CheckWorkspaceOption = Annotated[bool, typer.Option("--check-workspace/--no-check-workspace")]
 
 
 @contextmanager
@@ -74,6 +56,12 @@ def _temporary_env(**updates):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
+
+
+def _auto_init_workspace() -> None:
+    from rdagent.app.utils.init_workspace import init_workspace
+
+    init_workspace(force=False)
 
 
 def ui(port=19899, log_dir="", debug: bool = False, data_science: bool = False):
@@ -121,6 +109,8 @@ def fin_factor_cli(
     all_duration: Optional[str] = None,
     checkout: CheckoutOption = True,
 ):
+    from rdagent.app.qlib_rd_loop.factor import main as fin_factor
+
     fin_factor(path=path, step_n=step_n, loop_n=loop_n, all_duration=all_duration, checkout=checkout)
 
 
@@ -132,6 +122,8 @@ def fin_model_cli(
     all_duration: Optional[str] = None,
     checkout: CheckoutOption = True,
 ):
+    from rdagent.app.qlib_rd_loop.model import main as fin_model
+
     fin_model(path=path, step_n=step_n, loop_n=loop_n, all_duration=all_duration, checkout=checkout)
 
 
@@ -143,6 +135,8 @@ def fin_quant_cli(
     all_duration: Optional[str] = None,
     checkout: CheckoutOption = True,
 ):
+    from rdagent.app.qlib_rd_loop.quant import main as fin_quant
+
     fin_quant(path=path, step_n=step_n, loop_n=loop_n, all_duration=all_duration, checkout=checkout)
 
 
@@ -164,6 +158,8 @@ def fin_research_cli(
     min_cost_ir: float = 0.0,
     batch_size: int = 10,
 ):
+    from rdagent.app.qlib_rd_loop.research import main as fin_research
+
     fin_research(
         mode=mode,
         path=path,
@@ -193,6 +189,9 @@ def fin_mine_factors_cli(
     base_features_path: Optional[str] = None,
     batch_size: int = 10,
     ):
+    from rdagent.app.qlib_rd_loop.research import mine_factors as fin_mine_factors
+
+    _auto_init_workspace()
     fin_mine_factors(
         path=path,
         step_n=step_n,
@@ -215,6 +214,9 @@ def daily_factor_cli(
     batch_size: int = 10,
 ):
     """Mine factors from daily data with the simplest default path."""
+    from rdagent.app.qlib_rd_loop.research import mine_factors as fin_mine_factors
+
+    _auto_init_workspace()
     with _temporary_env(RDAGENT_FACTOR_DATA_MODE="daily"):
         fin_mine_factors(
             path=path,
@@ -238,6 +240,9 @@ def minute_factor_cli(
     batch_size: int = 10,
 ):
     """Mine daily factors from minute and quote sample data."""
+    from rdagent.app.qlib_rd_loop.research import mine_factors as fin_mine_factors
+
+    _auto_init_workspace()
     with _temporary_env(RDAGENT_FACTOR_DATA_MODE="minute"):
         fin_mine_factors(
             path=path,
@@ -318,6 +323,8 @@ def fin_model_from_pool_cli(
     factor_pool_path: Optional[str] = None,
     factor_top_k: Optional[int] = None,
 ):
+    from rdagent.app.qlib_rd_loop.research import model_from_pool as fin_model_from_pool
+
     fin_model_from_pool(
         step_n=step_n,
         loop_n=loop_n,
@@ -332,6 +339,8 @@ def fin_lgbm_from_pool_cli(
     factor_pool_path: Optional[str] = None,
     factor_top_k: Optional[int] = None,
 ):
+    from rdagent.app.qlib_rd_loop.research import lgbm_from_pool as fin_lgbm_from_pool
+
     fin_lgbm_from_pool(
         factor_pool_path=factor_pool_path,
         factor_top_k=factor_top_k,
@@ -348,6 +357,8 @@ def fin_backtest_model_library_cli(
     min_cost_ir: float = 0.0,
     llm_decision: bool = True,
 ):
+    from rdagent.app.qlib_rd_loop.research import backtest_model_library as fin_backtest_model_library
+
     fin_backtest_model_library(
         model_name=model_name,
         factor_pool_path=factor_pool_path,
@@ -364,6 +375,8 @@ def fin_import_models_from_report_cli(
     report_file_path: str,
     model_library_path: Optional[str] = None,
 ):
+    from rdagent.app.qlib_rd_loop.research import main as fin_research
+
     fin_research(
         mode="paper_to_model_library",
         report_file_path=report_file_path,
@@ -375,6 +388,8 @@ def fin_import_models_from_report_cli(
 def fin_list_model_library_cli(
     model_library_path: Optional[str] = None,
 ):
+    from rdagent.app.qlib_rd_loop.research import list_model_library as fin_list_model_library
+
     fin_list_model_library(model_library_path=model_library_path)
 
 
@@ -385,6 +400,9 @@ def fin_factor_report_cli(
     all_duration: Optional[str] = None,
     checkout: CheckoutOption = True,
 ):
+    from rdagent.app.qlib_rd_loop.factor_from_report import main as fin_factor_report
+
+    _auto_init_workspace()
     fin_factor_report(report_folder=report_folder, path=path, all_duration=all_duration, checkout=checkout)
 
 
@@ -398,6 +416,9 @@ def paper_factor_cli(
     all_duration: Optional[str] = None,
     checkout: CheckoutOption = True,
 ):
+    from rdagent.app.qlib_rd_loop.factor_from_report import main as fin_factor_report
+
+    _auto_init_workspace()
     fin_factor_report(report_folder=report_folder, path=path, all_duration=all_duration, checkout=checkout)
 
 
@@ -405,6 +426,27 @@ def paper_factor_cli(
 def knowledge_map_cli() -> None:
     """Show where each quant-factor workflow step looks for knowledge."""
     typer.echo(render_route_map())
+
+
+@app.command(name="init")
+def init_cli(
+    force: bool = typer.Option(False, help="Overwrite existing local workspace files such as .env and factor data."),
+) -> None:
+    """Create local workspace directories and prepare bundled starter data."""
+    from rdagent.app.utils.init_workspace import init_workspace
+
+    summary = init_workspace(force=force)
+    typer.echo("RD-Agent workspace initialized.")
+    typer.echo(f"Env: {summary['env']}")
+    typer.echo("Directories:")
+    for path in summary["created_dirs"]:
+        typer.echo(f"- {path}")
+    typer.echo("Data:")
+    for item in summary["data"]:
+        typer.echo(f"- {item}")
+    typer.echo("Next steps:")
+    for item in summary["next_steps"]:
+        typer.echo(f"- {item}")
 
 
 @app.command(name="ingest_factor_papers")
@@ -415,12 +457,17 @@ def ingest_factor_papers_cli(
     ),
 ) -> None:
     """Ingest factor-improvement papers into the structured paper knowledge base."""
+    from rdagent.app.qlib_rd_loop.paper_improvement import main as ingest_factor_improvement_papers
+
+    _auto_init_workspace()
     updated_count = ingest_factor_improvement_papers(report_folder=report_folder)
     typer.echo(f"Ingested {updated_count} paper(s) into the factor-improvement knowledge base.")
 
 
 @app.command(name="general_model")
 def general_model_cli(report_file_path: str):
+    from rdagent.app.general_model.general_model import extract_models_and_implement as general_model
+
     general_model(report_file_path)
 
 
@@ -433,6 +480,8 @@ def data_science_cli(
     timeout: Optional[str] = None,
     competition: Optional[str] = None,
 ):
+    from rdagent.app.data_science.loop import main as data_science
+
     data_science(
         path=path,
         checkout=checkout,
@@ -456,6 +505,8 @@ def llm_finetune_cli(
     loop_n: Optional[int] = None,
     timeout: Optional[str] = None,
 ):
+    from rdagent.app.finetune.llm.loop import main as llm_finetune
+
     llm_finetune(
         path=path,
         checkout=checkout,
@@ -472,6 +523,8 @@ def llm_finetune_cli(
 
 @app.command(name="grade_summary")
 def grade_summary_cli(log_folder: str):
+    from rdagent.log.mle_summary import grade_summary
+
     grade_summary(log_folder)
 
 
@@ -484,12 +537,22 @@ def health_check_cli(
     check_env: CheckEnvOption = True,
     check_docker: CheckDockerOption = True,
     check_ports: CheckPortsOption = True,
+    check_workspace: CheckWorkspaceOption = True,
 ):
-    health_check(check_env=check_env, check_docker=check_docker, check_ports=check_ports)
+    from rdagent.app.utils.health_check import health_check
+
+    health_check(
+        check_env=check_env,
+        check_docker=check_docker,
+        check_ports=check_ports,
+        check_workspace=check_workspace,
+    )
 
 
 @app.command(name="collect_info")
 def collect_info_cli():
+    from rdagent.app.utils.info import collect_info
+
     collect_info()
 
 
