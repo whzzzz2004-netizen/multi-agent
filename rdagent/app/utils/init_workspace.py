@@ -27,6 +27,23 @@ def _copy_if_missing(src: Path, dst: Path, *, force: bool = False) -> bool:
     return True
 
 
+def _is_valid_daily_factor_file(path: Path) -> bool:
+    if not path.exists():
+        return False
+    try:
+        df = pd.read_hdf(path, key="data")
+    except Exception:
+        return False
+    required_columns = {"$open", "$close", "$high", "$low", "$volume", "$factor"}
+    return (
+        df is not None
+        and not df.empty
+        and isinstance(df.index, pd.MultiIndex)
+        and set(df.index.names) == {"datetime", "instrument"}
+        and required_columns.issubset(df.columns)
+    )
+
+
 def _ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
@@ -193,16 +210,49 @@ def _ensure_factor_data(force: bool = False) -> list[str]:
     debug_data_dir = FACTOR_DATA_DEBUG_DIR
     _ensure_dir(full_data_dir)
     _ensure_dir(debug_data_dir)
+    full_template_path = TEMPLATE_DIR / "daily_pv_all.h5"
+    debug_template_path = TEMPLATE_DIR / "daily_pv_debug.h5"
+    full_target_path = full_data_dir / "daily_pv.h5"
+    debug_target_path = debug_data_dir / "daily_pv.h5"
 
-    copied_full = _copy_if_missing(TEMPLATE_DIR / "daily_pv_all.h5", full_data_dir / "daily_pv.h5", force=force)
-    copied_debug = _copy_if_missing(TEMPLATE_DIR / "daily_pv_debug.h5", debug_data_dir / "daily_pv.h5", force=force)
+    copied_full = False
+    copied_debug = False
+    if _is_valid_daily_factor_file(full_template_path):
+        copied_full = _copy_if_missing(full_template_path, full_target_path, force=force)
+    if _is_valid_daily_factor_file(debug_template_path):
+        copied_debug = _copy_if_missing(debug_template_path, debug_target_path, force=force)
     copied_full_readme = _copy_if_missing(TEMPLATE_DIR / "README.md", full_data_dir / "README.md", force=force)
     copied_debug_readme = _copy_if_missing(TEMPLATE_DIR / "README.md", debug_data_dir / "README.md", force=force)
 
+    full_ready = _is_valid_daily_factor_file(full_target_path)
+    debug_ready = _is_valid_daily_factor_file(debug_target_path)
+
+    if not (full_ready and debug_ready):
+        logger.info(
+            "Bundled daily factor templates are missing or invalid; "
+            "attempting to generate daily factor data automatically from qlib."
+        )
+        from rdagent.scenarios.qlib.experiment.utils import generate_data_folder_from_qlib
+
+        generate_data_folder_from_qlib()
+        full_ready = _is_valid_daily_factor_file(full_target_path)
+        debug_ready = _is_valid_daily_factor_file(debug_target_path)
+        if not (full_ready and debug_ready):
+            raise RuntimeError(
+                "Failed to prepare daily factor data automatically. "
+                "Expected valid files at "
+                f"{full_target_path} and {debug_target_path}."
+            )
+        actions.append("Generated daily factor data automatically from qlib.")
+
     if copied_full:
-        actions.append(f"Prepared daily factor data: {full_data_dir / 'daily_pv.h5'}")
+        actions.append(f"Prepared daily factor data: {full_target_path}")
+    elif full_ready:
+        actions.append(f"Using daily factor data: {full_target_path}")
     if copied_debug:
-        actions.append(f"Prepared debug daily factor data: {debug_data_dir / 'daily_pv.h5'}")
+        actions.append(f"Prepared debug daily factor data: {debug_target_path}")
+    elif debug_ready:
+        actions.append(f"Using debug daily factor data: {debug_target_path}")
     if copied_full_readme or copied_debug_readme:
         actions.append("Prepared factor data README files.")
 
