@@ -18,6 +18,7 @@ FACTOR_MANIFEST_PATH = FACTOR_OUTPUT_DIR / "manifest.csv"
 FACTOR_LEADERBOARD_PATH = FACTOR_OUTPUT_DIR / "leaderboard.csv"
 PAPER_IMPROVEMENT_SUMMARY_PATH = KNOWLEDGE_V2_DIR / "paper_improvement" / "paper_improvement_ideas.jsonl"
 ERROR_CASES_PATH = KNOWLEDGE_V2_DIR / "error_cases" / "factor_error_cases.jsonl"
+FAILED_FACTOR_SUMMARY_PATH = KNOWLEDGE_V2_DIR / "failed_factors" / "failed_factor_ideas.jsonl"
 
 
 @dataclass(frozen=True)
@@ -38,6 +39,7 @@ def ensure_knowledge_v2_dirs() -> None:
     for path in [
         KNOWLEDGE_V2_DIR / "paper_improvement",
         KNOWLEDGE_V2_DIR / "error_cases",
+        KNOWLEDGE_V2_DIR / "failed_factors",
         PAPER_IMPROVEMENT_DROPBOX,
     ]:
         path.mkdir(parents=True, exist_ok=True)
@@ -59,6 +61,11 @@ FACTOR_WORKFLOW_ROUTES: tuple[KnowledgeRoute, ...] = (
                 description="所有已入库因子的元数据、标签、来源和路径。",
             ),
             KnowledgeSource(
+                name="failed_factor_ideas",
+                path=FAILED_FACTOR_SUMMARY_PATH,
+                description="历史失败因子的简要逻辑与失败原因，用于避免重复踩坑。",
+            ),
+            KnowledgeSource(
                 name="paper_improvement_ideas",
                 path=PAPER_IMPROVEMENT_SUMMARY_PATH,
                 description="关于如何改进因子的论文摘要、启发和适用标签。",
@@ -73,6 +80,11 @@ FACTOR_WORKFLOW_ROUTES: tuple[KnowledgeRoute, ...] = (
                 name="factor_leaderboard",
                 path=FACTOR_LEADERBOARD_PATH,
                 description="高 IC 因子及其逻辑摘要，用于避免重复和提供方向参考。",
+            ),
+            KnowledgeSource(
+                name="failed_factor_ideas",
+                path=FAILED_FACTOR_SUMMARY_PATH,
+                description="失败因子摘要，用于避开低 IC 或实现脆弱的方向。",
             ),
             KnowledgeSource(
                 name="paper_improvement_ideas",
@@ -153,6 +165,13 @@ def load_top_factor_records(limit: int = 8) -> list[dict]:
     leaderboard = pd.read_csv(FACTOR_LEADERBOARD_PATH)
     if leaderboard.empty:
         return []
+    if "accepted" in leaderboard.columns:
+        accepted = leaderboard["accepted"]
+        if accepted.dtype == object:
+            accepted = accepted.astype(str).str.lower().isin({"1", "true", "yes", "y"})
+        leaderboard = leaderboard[accepted.fillna(False)]
+        if leaderboard.empty:
+            return []
     if "ic_score" in leaderboard.columns:
         leaderboard["ic_score"] = pd.to_numeric(leaderboard["ic_score"], errors="coerce")
         leaderboard = leaderboard.sort_values("ic_score", ascending=False, na_position="last")
@@ -175,6 +194,27 @@ def load_paper_improvement_records(limit: int = 6) -> list[dict]:
     return records[:limit]
 
 
+def load_failed_factor_records(limit: int = 6) -> list[dict]:
+    records = _load_jsonl(FAILED_FACTOR_SUMMARY_PATH)
+    if not records:
+        return []
+    records = sorted(records, key=lambda x: x.get("updated_at", ""), reverse=True)
+    return records[:limit]
+
+
+def upsert_failed_factor_record(record: dict) -> None:
+    ensure_knowledge_v2_dirs()
+    existing = _load_jsonl(FAILED_FACTOR_SUMMARY_PATH)
+    factor_name = record.get("factor_name")
+    if factor_name:
+        existing = [item for item in existing if item.get("factor_name") != factor_name]
+    existing.append(record)
+    FAILED_FACTOR_SUMMARY_PATH.write_text(
+        "\n".join(json.dumps(item, ensure_ascii=False) for item in existing) + "\n",
+        encoding="utf-8",
+    )
+
+
 def _format_records(title: str, records: Iterable[dict], keys: list[str]) -> str:
     records = list(records)
     if not records:
@@ -194,6 +234,7 @@ def _format_records(title: str, records: Iterable[dict], keys: list[str]) -> str
 
 def build_factor_generation_knowledge_brief(
     leaderboard_limit: int = 8,
+    failed_limit: int = 6,
     paper_limit: int = 5,
 ) -> str:
     ensure_knowledge_v2_dirs()
@@ -202,6 +243,11 @@ def build_factor_generation_knowledge_brief(
             "Accepted factors to avoid duplicating and to learn from",
             load_top_factor_records(limit=leaderboard_limit),
             ["factor_name", "ic_score", "logic_summary", "tags", "source_type"],
+        ),
+        _format_records(
+            "Failed factor directions to avoid repeating blindly",
+            load_failed_factor_records(limit=failed_limit),
+            ["factor_name", "failure_reason", "ic_score", "logic_summary", "tags"],
         ),
         _format_records(
             "Paper-derived improvement ideas",
@@ -214,6 +260,7 @@ def build_factor_generation_knowledge_brief(
 
 def build_factor_generation_knowledge_summary(
     leaderboard_limit: int = 3,
+    failed_limit: int = 4,
     paper_limit: int = 2,
     improvement_ideas_per_paper: int = 2,
 ) -> str:
@@ -239,6 +286,24 @@ def build_factor_generation_knowledge_summary(
                 parts.append(logic_summary[:160])
             factor_lines.append("- " + " | ".join(parts))
 
+    failed_records = load_failed_factor_records(limit=failed_limit)
+    failed_lines = ["Failed factor directions to avoid repeating blindly:"]
+    if not failed_records:
+        failed_lines.append("- none")
+    else:
+        for record in failed_records:
+            parts = [str(record.get("factor_name"))]
+            failure_reason = record.get("failure_reason")
+            if failure_reason:
+                parts.append(f"reason={failure_reason}")
+            ic_score = record.get("ic_score")
+            if ic_score not in (None, "") and pd.notna(ic_score):
+                parts.append(f"IC={float(ic_score):.4f}")
+            logic_summary = record.get("logic_summary")
+            if isinstance(logic_summary, str) and logic_summary:
+                parts.append(logic_summary[:160])
+            failed_lines.append("- " + " | ".join(parts))
+
     paper_records = load_paper_improvement_records(limit=paper_limit)
     paper_lines = ["Factor-improvement paper ideas you may borrow:"]
     if not paper_records:
@@ -259,4 +324,4 @@ def build_factor_generation_knowledge_summary(
             for idea in trimmed_ideas:
                 paper_lines.append(f"  idea: {idea}")
 
-    return "\n".join(factor_lines + [""] + paper_lines)
+    return "\n".join(factor_lines + [""] + failed_lines + [""] + paper_lines)

@@ -63,14 +63,18 @@ evolving_strategy_factor_implementation_v1_system: |-
   ```python
   import pandas as pd
   import numpy as np
+  import os
+  from pathlib import Path
+
+  DATA_DIR = Path(os.environ.get("FACTOR_DATA_DIR") or os.environ.get("RDAGENT_FACTOR_DATA_DIR") or ".")
 
   def calculate_<Factor_Name>():
-      # Read the appropriate source file - all data files use key="data"
+      # Read the appropriate source file from the shared data directory - all data files use key="data"
       # Examples:
       #   daily_pv.h5           -> daily OHLCV
       #   minute_pv.h5          -> minute OHLCV/VWAP
       #   minute_quote.h5       -> minute bid/ask sample
-      df = pd.read_hdf("daily_pv.h5", key="data")
+      df = pd.read_hdf(DATA_DIR / "daily_pv.h5", key="data")
 
       # Calculate your factor here
       # Example: 10-day momentum

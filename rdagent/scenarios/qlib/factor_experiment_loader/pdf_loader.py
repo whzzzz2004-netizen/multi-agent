@@ -26,6 +26,16 @@ from rdagent.scenarios.qlib.factor_experiment_loader.json_loader import (
 from rdagent.utils.agent.tpl import T
 
 
+def _summarize_docs_dict(docs_dict: Mapping[str, str]) -> dict[str, dict[str, int]]:
+    return {
+        path: {
+            "chars": len(content),
+            "lines": content.count("\n") + 1 if content else 0,
+        }
+        for path, content in docs_dict.items()
+    }
+
+
 def classify_report_from_dict(
     report_dict: Mapping[str, str],
     vote_time: int = 1,
@@ -565,12 +575,20 @@ def deduplicate_factors_by_llm(  # noqa: C901, PLR0912
 
 
 class FactorExperimentLoaderFromPDFfiles(FactorExperimentLoader):
-    def load(self, file_or_folder_path: str) -> QlibFactorExperiment:
+    def load_from_docs_dict(
+        self,
+        docs_dict: dict[str, str],
+        *,
+        skip_report_classification: bool = False,
+        skip_factor_viability_check: bool = False,
+    ) -> QlibFactorExperiment:
         with logger.tag("docs"):
-            docs_dict = load_and_process_pdfs_by_langchain(file_or_folder_path)
-            logger.log_object(docs_dict)
+            logger.log_object(_summarize_docs_dict(docs_dict))
 
-        selected_report_dict = classify_report_from_dict(report_dict=docs_dict, vote_time=1)
+        if skip_report_classification:
+            selected_report_dict = {path: {"class": 1} for path in docs_dict}
+        else:
+            selected_report_dict = classify_report_from_dict(report_dict=docs_dict, vote_time=1)
 
         with logger.tag("file_to_factor_result"):
             file_to_factor_result = extract_factors_from_report_dict(docs_dict, selected_report_dict)
@@ -580,10 +598,17 @@ class FactorExperimentLoaderFromPDFfiles(FactorExperimentLoader):
             factor_dict = merge_file_to_factor_dict_to_factor_dict(file_to_factor_result)
             logger.log_object(factor_dict)
 
-        with logger.tag("filtered_factor_dict"):
-            factor_viability, filtered_factor_dict = check_factor_viability(factor_dict)
-            logger.log_object(filtered_factor_dict)
-
-        # factor_dict, duplication_names_list = deduplicate_factors_by_llm(factor_dict, factor_viability)
+        if skip_factor_viability_check:
+            filtered_factor_dict = factor_dict
+            with logger.tag("filtered_factor_dict"):
+                logger.log_object(filtered_factor_dict)
+        else:
+            with logger.tag("filtered_factor_dict"):
+                factor_viability, filtered_factor_dict = check_factor_viability(factor_dict)
+                logger.log_object(filtered_factor_dict)
 
         return FactorExperimentLoaderFromDict().load(filtered_factor_dict)
+
+    def load(self, file_or_folder_path: str) -> QlibFactorExperiment:
+        docs_dict = load_and_process_pdfs_by_langchain(file_or_folder_path)
+        return self.load_from_docs_dict(docs_dict)

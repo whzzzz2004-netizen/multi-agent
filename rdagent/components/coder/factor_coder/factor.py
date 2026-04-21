@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 import subprocess
+import textwrap
 import uuid
 from datetime import datetime
 from pathlib import Path
@@ -92,6 +93,7 @@ class FactorFBWorkspace(FBWorkspace):
     FB_OUTPUT_FILE_FOUND = "\nExpected output file found."
     EXPORTED_PARQUET_DIR = Path.cwd() / "git_ignore_folder" / "factor_outputs"
     LEADERBOARD_PATH = EXPORTED_PARQUET_DIR / "leaderboard.csv"
+    EXECUTION_LAUNCHER = "_rdagent_factor_launcher.py"
 
     def __init__(
         self,
@@ -185,6 +187,15 @@ class FactorFBWorkspace(FBWorkspace):
             tags.add("daily_input")
         return sorted(tags)
 
+    @staticmethod
+    def _compact_logic_summary(text: str | None, limit: int = 160) -> str | None:
+        if text is None:
+            return None
+        compact = " ".join(str(text).split())
+        if len(compact) <= limit:
+            return compact
+        return compact[: limit - 3].rstrip() + "..."
+
     def _write_factor_metadata(
         self,
         factor_name: str,
@@ -268,36 +279,32 @@ class FactorFBWorkspace(FBWorkspace):
         if manifest.empty:
             return
         leaderboard = manifest.copy()
-        if "accepted" in leaderboard.columns:
-            leaderboard = leaderboard[leaderboard["accepted"].fillna(False).astype(bool)]
+        if "accepted" not in leaderboard.columns:
+            leaderboard["accepted"] = False
+        leaderboard["accepted"] = leaderboard["accepted"].fillna(False).astype(bool)
         if "ic_score" in leaderboard.columns:
             leaderboard["ic_score"] = pd.to_numeric(leaderboard["ic_score"], errors="coerce")
         else:
             leaderboard["ic_score"] = pd.NA
         if "updated_at" in leaderboard.columns:
             leaderboard["updated_at"] = pd.to_datetime(leaderboard["updated_at"], errors="coerce")
+        if "logic_summary" in leaderboard.columns:
+            leaderboard["logic_summary"] = leaderboard["logic_summary"].apply(self._compact_logic_summary)
         preferred_columns = [
             "rank",
             "factor_name",
             "ic_score",
             "logic_summary",
             "tags",
-            "source_type",
-            "source_report_title",
-            "time_granularity",
-            "latest_path",
-            "workspace_path",
-            "updated_at",
         ]
         leaderboard = leaderboard.sort_values(
-            by=["ic_score", "updated_at", "factor_name"],
-            ascending=[False, False, True],
+            by=["accepted", "ic_score", "updated_at", "factor_name"],
+            ascending=[False, False, False, True],
             na_position="last",
         ).reset_index(drop=True)
         leaderboard.insert(0, "rank", leaderboard.index + 1)
         existing_columns = [column for column in preferred_columns if column in leaderboard.columns]
-        remaining_columns = [column for column in leaderboard.columns if column not in existing_columns]
-        leaderboard = leaderboard[existing_columns + remaining_columns]
+        leaderboard = leaderboard[existing_columns]
         leaderboard.to_csv(self.LEADERBOARD_PATH, index=False)
 
     def _export_factor_dataframe(self, df: pd.DataFrame, review_metadata: dict[str, Any] | None = None) -> None:
@@ -349,13 +356,68 @@ class FactorFBWorkspace(FBWorkspace):
         review_metadata.update(extra_review_metadata)
         self._export_factor_dataframe(df, review_metadata=review_metadata)
 
+    @classmethod
+    def _build_shared_data_launcher(cls, source_data_path: Path, code_path: Path) -> str:
+        source_data_path = source_data_path.resolve()
+        code_path = code_path.resolve()
+        return textwrap.dedent(
+            f"""
+            import builtins
+            import os
+            import runpy
+            from pathlib import Path
+
+            import pandas as pd
+
+            DATA_DIR = Path({str(source_data_path)!r})
+            os.environ["FACTOR_DATA_DIR"] = str(DATA_DIR)
+            os.environ["RDAGENT_FACTOR_DATA_DIR"] = str(DATA_DIR)
+
+            def _resolve_data_path(path_like):
+                if path_like is None:
+                    return path_like
+                try:
+                    candidate = Path(path_like)
+                except TypeError:
+                    return path_like
+                if candidate.is_absolute() or candidate.exists():
+                    return path_like
+                fallback = DATA_DIR / candidate
+                if fallback.exists():
+                    return str(fallback)
+                return path_like
+
+            _orig_read_hdf = pd.read_hdf
+            _orig_read_pickle = pd.read_pickle
+            _orig_read_csv = pd.read_csv
+            _orig_read_parquet = pd.read_parquet
+            _orig_open = builtins.open
+
+            pd.read_hdf = lambda path_or_buf, *args, **kwargs: _orig_read_hdf(
+                _resolve_data_path(path_or_buf), *args, **kwargs
+            )
+            pd.read_pickle = lambda filepath_or_buffer, *args, **kwargs: _orig_read_pickle(
+                _resolve_data_path(filepath_or_buffer), *args, **kwargs
+            )
+            pd.read_csv = lambda filepath_or_buffer, *args, **kwargs: _orig_read_csv(
+                _resolve_data_path(filepath_or_buffer), *args, **kwargs
+            )
+            pd.read_parquet = lambda path, *args, **kwargs: _orig_read_parquet(
+                _resolve_data_path(path), *args, **kwargs
+            )
+            builtins.open = lambda file, *args, **kwargs: _orig_open(_resolve_data_path(file), *args, **kwargs)
+
+            runpy.run_path({str(code_path)!r}, run_name="__main__")
+            """
+        ).strip() + "\n"
+
     @cache_with_pickle(hash_func)
     def execute(self, data_type: str = "Debug") -> Tuple[str, pd.DataFrame]:
         """
         execute the implementation and get the factor value by the following steps:
         1. make the directory in workspace path
         2. write the code to the file in the workspace path
-        3. link all the source data to the workspace path folder
+        3. expose the shared source data directory to the execution process
         if call_factor_py is True:
             4. execute the code
         else:
@@ -393,14 +455,16 @@ class FactorFBWorkspace(FBWorkspace):
             source_data_path.mkdir(exist_ok=True, parents=True)
             code_path = self.workspace_path / f"factor.py"
 
-            self.link_all_files_in_folder_to_workspace(source_data_path, self.workspace_path)
-
             execution_feedback = self.FB_EXECUTION_SUCCEEDED
             execution_success = False
             execution_error = None
 
             if self.target_task.version == 1:
-                execution_code_path = code_path
+                execution_code_path = self.workspace_path / self.EXECUTION_LAUNCHER
+                execution_code_path.write_text(
+                    self._build_shared_data_launcher(source_data_path=source_data_path, code_path=code_path),
+                    encoding="utf-8",
+                )
             elif self.target_task.version == 2:
                 execution_code_path = self.workspace_path / f"{uuid.uuid4()}.py"
                 execution_code_path.write_text((Path(__file__).parent / "factor_execution_template.txt").read_text())
@@ -410,6 +474,11 @@ class FactorFBWorkspace(FBWorkspace):
                     f"{FACTOR_COSTEER_SETTINGS.python_bin} {execution_code_path}",
                     shell=True,
                     cwd=self.workspace_path,
+                    env={
+                        **os.environ,
+                        "FACTOR_DATA_DIR": str(source_data_path.resolve()),
+                        "RDAGENT_FACTOR_DATA_DIR": str(source_data_path.resolve()),
+                    },
                     stderr=subprocess.STDOUT,
                     timeout=FACTOR_COSTEER_SETTINGS.file_based_execution_timeout,
                 )

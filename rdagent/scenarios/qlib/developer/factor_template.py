@@ -5,6 +5,11 @@
 
 import pandas as pd
 import numpy as np
+import os
+from pathlib import Path
+
+
+DATA_DIR = Path(os.environ.get("FACTOR_DATA_DIR") or os.environ.get("RDAGENT_FACTOR_DATA_DIR") or ".")
 
 
 def calculate_volume_imbalance():
@@ -17,7 +22,7 @@ def calculate_volume_imbalance():
     # - daily_pv.h5
     # - minute_pv.h5
     # - minute_quote.h5
-    df = pd.read_hdf("daily_pv.h5", key="data")
+    df = pd.read_hdf(DATA_DIR / "daily_pv.h5", key="data")
     
     # 2. 确保成交量是数值类型（注意列名可能是 'volume' 或 '$volume'）
     # 根据数据描述，列名是 '$volume'
@@ -54,7 +59,7 @@ def calculate_volume_imbalance_alternative():
     """
     成交量失衡因子的另一种写法 - 使用 rolling + reset_index
     """
-    df = pd.read_hdf("daily_pv.h5", key="data")
+    df = pd.read_hdf(DATA_DIR / "daily_pv.h5", key="data")
     
     # 获取成交量列
     volume = pd.to_numeric(df['$volume'], errors='coerce')
@@ -84,7 +89,7 @@ def calculate_volume_imbalance_simple():
     成交量失衡因子的简单写法 - 直接使用 rolling + mean
     注意：这种写法需要确保索引正确对齐
     """
-    df = pd.read_hdf("daily_pv.h5", key="data")
+    df = pd.read_hdf(DATA_DIR / "daily_pv.h5", key="data")
     
     # 计算成交量
     volume = pd.to_numeric(df['$volume'], errors='coerce')

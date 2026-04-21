@@ -60,7 +60,25 @@ def generate_hypothesis(factor_result: dict, report_content: str) -> str:
     )
 
 
-def extract_hypothesis_and_exp_from_reports(report_file_path: str) -> QlibFactorExperiment | None:
+def build_lightweight_hypothesis(report_file_path: str, factor_result: dict) -> Hypothesis:
+    factor_names = list(factor_result)
+    factor_preview = ", ".join(factor_names[:3]) if factor_names else "no extracted factors"
+    report_title = Path(report_file_path).stem
+    return Hypothesis(
+        hypothesis=f"Reproduce factors extracted from report: {report_title}",
+        reason=f"Implement the core factors described in the report and validate them with full-sample IC.",
+        concise_reason=f"Report-derived factor reproduction for {report_title}.",
+        concise_observation=f"Extracted factors include: {factor_preview}.",
+        concise_justification=f"Directly implement the report's factor definitions with minimal extra reasoning.",
+        concise_knowledge=f"Use extracted factor names, formulations, and variables from {report_title}.",
+    )
+
+
+def extract_hypothesis_and_exp_from_reports(
+    report_file_path: str,
+    *,
+    minimal_mode: bool = True,
+) -> QlibFactorExperiment | None:
     """
     Extract hypothesis and experiment details from report files.
 
@@ -71,14 +89,17 @@ def extract_hypothesis_and_exp_from_reports(report_file_path: str) -> QlibFactor
         QlibFactorExperiment: An instance of QlibFactorExperiment containing the extracted details.
         None: If no valid experiment is found in the report.
     """
-    exp = FactorExperimentLoaderFromPDFfiles().load(report_file_path)
+    docs_dict = load_and_process_pdfs_by_langchain(report_file_path)
+    exp = FactorExperimentLoaderFromPDFfiles().load_from_docs_dict(
+        docs_dict,
+        skip_report_classification=minimal_mode,
+        skip_factor_viability_check=minimal_mode,
+    )
     if exp is None or exp.sub_tasks == []:
         return None
 
     pdf_screenshot = extract_first_page_screenshot_from_pdf(report_file_path)
     logger.log_object(pdf_screenshot, tag="load_pdf_screenshot")
-
-    docs_dict = load_and_process_pdfs_by_langchain(report_file_path)
 
     factor_result = {
         task.factor_name: {
@@ -91,7 +112,11 @@ def extract_hypothesis_and_exp_from_reports(report_file_path: str) -> QlibFactor
     }
 
     report_content = "\n".join(docs_dict.values())
-    hypothesis = generate_hypothesis(factor_result, report_content)
+    hypothesis = (
+        build_lightweight_hypothesis(report_file_path, factor_result)
+        if minimal_mode
+        else generate_hypothesis(factor_result, report_content)
+    )
     exp.hypothesis = hypothesis
     exp.source_report_path = str(Path(report_file_path).resolve())
     exp.source_report_title = Path(report_file_path).stem
@@ -99,8 +124,9 @@ def extract_hypothesis_and_exp_from_reports(report_file_path: str) -> QlibFactor
 
 
 class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
-    def __init__(self, report_folder: str = None):
+    def __init__(self, report_folder: str = None, minimal_mode: bool = True):
         super().__init__(PROP_SETTING=FACTOR_FROM_REPORT_PROP_SETTING)
+        self.minimal_mode = minimal_mode
         if report_folder is None:
             self.judge_pdf_data_items = json.load(
                 open(FACTOR_FROM_REPORT_PROP_SETTING.report_result_json_file_path, "r")
@@ -118,7 +144,10 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
             if self.get_unfinished_loop_cnt(self.loop_idx) < RD_AGENT_SETTINGS.get_max_parallel():
                 report_file_path = self.judge_pdf_data_items[self.loop_idx + self.shift_report]
                 logger.info(f"Processing number {self.loop_idx} report: {report_file_path}")
-                exp = extract_hypothesis_and_exp_from_reports(str(report_file_path))
+                exp = extract_hypothesis_and_exp_from_reports(
+                    str(report_file_path),
+                    minimal_mode=self.minimal_mode,
+                )
                 if exp is None:
                     self.shift_report += 1
                     self.loop_n -= 1
@@ -163,7 +192,11 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
                     continue
                 if df is None or df.empty:
                     continue
-                ic_feedback, full_sample_ic = evaluate_factor_ic_from_workspace(workspace, data_type="All")
+                ic_feedback, full_sample_ic = evaluate_factor_ic_from_workspace(
+                    workspace,
+                    data_type="All",
+                    gen_df=df,
+                )
                 if full_sample_ic is None or abs(full_sample_ic) < FACTOR_COSTEER_SETTINGS.min_abs_ic:
                     logger.info(
                         f"Skip reviewed export for report-derived factor {task.factor_name} because full-sample IC "
@@ -235,7 +268,7 @@ def _infer_report_factor_registry_tags(task, feedback) -> list[str]:
     return sorted(tags)
 
 
-def main(report_folder=None, path=None, all_duration=None, checkout=True):
+def main(report_folder=None, path=None, all_duration=None, checkout=True, minimal_mode=True):
     """
     Auto R&D Evolving loop for fintech factors (the factors are extracted from finance reports).
 
@@ -245,11 +278,11 @@ def main(report_folder=None, path=None, all_duration=None, checkout=True):
         step_n (int, optional): Step number to continue running a session.
     """
     if path is None and report_folder is None:
-        model_loop = FactorReportLoop()
+        model_loop = FactorReportLoop(minimal_mode=minimal_mode)
     elif path is not None:
         model_loop = FactorReportLoop.load(path, checkout=checkout)
     else:
-        model_loop = FactorReportLoop(report_folder=report_folder)
+        model_loop = FactorReportLoop(report_folder=report_folder, minimal_mode=minimal_mode)
 
     asyncio.run(model_loop.run(all_duration=all_duration))
 

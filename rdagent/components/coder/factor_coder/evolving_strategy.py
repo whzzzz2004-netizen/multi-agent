@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import re
 from pathlib import Path
-from typing import Dict
+from typing import Dict, Generator
 
 from rdagent.components.coder.CoSTEER.evaluators import CoSTEERSingleFeedback
 from rdagent.components.coder.CoSTEER.evolving_strategy import (
@@ -34,10 +34,56 @@ def get_factor_template() -> str:
 
 
 class FactorMultiProcessEvolvingStrategy(MultiProcessEvolvingStrategy):
+    MAX_CONSECUTIVE_OUTPUT_WITHOUT_ACCEPT = 5
+
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.num_loop = 0
         self.haveSelected = False
+
+    @classmethod
+    def _has_output_but_not_accepted(cls, feedback: CoSTEERSingleFeedback | None) -> bool:
+        if feedback is None:
+            return False
+        value_generated_flag = getattr(feedback, "value_generated_flag", False)
+        final_decision = getattr(feedback, "final_decision", None)
+        return bool(value_generated_flag) and final_decision is False
+
+    @classmethod
+    def _mark_stalled_tasks_from_trace(cls, evo, queried_knowledge, evolving_trace) -> None:
+        if queried_knowledge is None or not evolving_trace:
+            return
+
+        for task_index, target_task in enumerate(evo.sub_tasks):
+            task_info = target_task.get_task_information()
+            consecutive_failures = 0
+            for step in reversed(evolving_trace):
+                fb = None
+                if step.feedback is not None and task_index < len(step.feedback):
+                    fb = step.feedback[task_index]
+                if cls._has_output_but_not_accepted(fb):
+                    consecutive_failures += 1
+                    if consecutive_failures >= cls.MAX_CONSECUTIVE_OUTPUT_WITHOUT_ACCEPT:
+                        queried_knowledge.failed_task_info_set.add(task_info)
+                        break
+                else:
+                    break
+
+    def evolve_iter(
+        self,
+        *,
+        evo,
+        queried_knowledge: CoSTEERQueriedKnowledge | None = None,
+        evolving_trace=[],
+        **kwargs,
+    ) -> Generator:
+        self._mark_stalled_tasks_from_trace(evo, queried_knowledge, evolving_trace)
+        yield from super().evolve_iter(
+            evo=evo,
+            queried_knowledge=queried_knowledge,
+            evolving_trace=evolving_trace,
+            **kwargs,
+        )
 
     def error_summary(
         self,

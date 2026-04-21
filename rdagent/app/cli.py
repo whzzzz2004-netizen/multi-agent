@@ -306,12 +306,18 @@ def paper_factor_entry(
     path: Optional[str] = None,
     all_duration: Optional[str] = None,
     checkout: CheckoutOption = True,
+    minimal_mode: bool = typer.Option(
+        True,
+        "--minimal-mode/--full-mode",
+        help="Use the lowest-cost extraction path by skipping report classification and extra hypothesis generation.",
+    ),
 ):
     paper_factor_cli(
         report_folder=report_folder,
         path=path,
         all_duration=all_duration,
         checkout=checkout,
+        minimal_mode=minimal_mode,
     )
 
 
@@ -403,7 +409,8 @@ def fin_factor_report_cli(
     from rdagent.app.qlib_rd_loop.factor_from_report import main as fin_factor_report
 
     _auto_init_workspace()
-    fin_factor_report(report_folder=report_folder, path=path, all_duration=all_duration, checkout=checkout)
+    with _temporary_env(LOG_LLM_CHAT_CONTENT="False"):
+        fin_factor_report(report_folder=report_folder, path=path, all_duration=all_duration, checkout=checkout)
 
 
 @app.command(name="paper_factor")
@@ -415,11 +422,23 @@ def paper_factor_cli(
     path: Optional[str] = None,
     all_duration: Optional[str] = None,
     checkout: CheckoutOption = True,
+    minimal_mode: bool = typer.Option(
+        True,
+        "--minimal-mode/--full-mode",
+        help="Use the lowest-cost extraction path by skipping report classification and extra hypothesis generation.",
+    ),
 ):
     from rdagent.app.qlib_rd_loop.factor_from_report import main as fin_factor_report
 
     _auto_init_workspace()
-    fin_factor_report(report_folder=report_folder, path=path, all_duration=all_duration, checkout=checkout)
+    with _temporary_env(LOG_LLM_CHAT_CONTENT="False"):
+        fin_factor_report(
+            report_folder=report_folder,
+            path=path,
+            all_duration=all_duration,
+            checkout=checkout,
+            minimal_mode=minimal_mode,
+        )
 
 
 @app.command(name="knowledge_map")

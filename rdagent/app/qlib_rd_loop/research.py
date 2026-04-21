@@ -9,6 +9,7 @@ import asyncio
 import json
 import math
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
 
@@ -21,6 +22,7 @@ from rdagent.components.coder.factor_coder.eva_utils import evaluate_factor_ic_f
 from rdagent.app.qlib_rd_loop.conf import FACTOR_PROP_SETTING, MODEL_PROP_SETTING
 from rdagent.app.qlib_rd_loop.factor import FactorRDLoop
 from rdagent.app.qlib_rd_loop.model import ModelRDLoop
+from rdagent.core.exception import CoderError
 from rdagent.core.exception import ModelEmptyError
 from rdagent.core.proposal import HypothesisFeedback
 from rdagent.log import rdagent_logger as logger
@@ -39,6 +41,7 @@ from rdagent.scenarios.qlib.developer.model_coder import QlibModelCoSTEER
 from rdagent.scenarios.qlib.developer.model_runner import QlibModelRunner
 from rdagent.scenarios.qlib.experiment.model_experiment import QlibModelExperiment
 from rdagent.scenarios.qlib.experiment.workspace import QlibFBWorkspace
+from rdagent.scenarios.qlib.knowledge_router import upsert_failed_factor_record
 
 
 class FactorMiningLoop(FactorRDLoop):
@@ -53,6 +56,54 @@ class FactorMiningLoop(FactorRDLoop):
         # Count accepted exports instead of attempted tasks so the loop keeps
         # mining until we have enough usable factors in the pool.
         self.mined_factor_count = 0
+        if self.coder is not None:
+            self.coder.with_knowledge = True
+            self.coder.knowledge_self_gen = False
+            if hasattr(self.coder, "rag"):
+                self.coder.rag.dump_knowledge_base_path = None
+                self.coder.rag.knowledgebase = self.coder.rag.load_or_init_knowledge_base(
+                    former_knowledge_base_path=None,
+                    evolving_version=self.coder.evolving_version,
+                )
+
+    @staticmethod
+    def _record_failed_factor(task, *, failure_reason: str, ic_score: float | None = None, tags: list[str] | None = None):
+        upsert_failed_factor_record(
+            {
+                "factor_name": getattr(task, "factor_name", None),
+                "logic_summary": getattr(task, "factor_description", None),
+                "failure_reason": failure_reason,
+                "ic_score": ic_score,
+                "tags": tags or [],
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        )
+
+    @staticmethod
+    def _task_priority_score(task) -> float:
+        name = getattr(task, "factor_name", "") or ""
+        description = getattr(task, "factor_description", "") or ""
+        formulation = getattr(task, "factor_formulation", "") or ""
+        variables = getattr(task, "variables", {}) or {}
+        content = " ".join([name, description, formulation, str(variables)]).lower()
+
+        score = 0.0
+
+        if any(keyword in content for keyword in ["daily", "day", "daily_pv", "$close", "$open", "$high", "$low"]):
+            score += 2.0
+        if any(keyword in content for keyword in ["momentum", "reversal", "volatility", "correlation", "vwap"]):
+            score += 1.0
+        if "minute" in content:
+            score -= 1.5
+        if any(keyword in content for keyword in ["quote", "bid", "ask", "microstructure"]):
+            score -= 1.0
+        if any(keyword in content for keyword in ["regression", "bucket", "quantile", "institutional", "sensitivity"]):
+            score -= 0.5
+
+        variable_count = len(variables) if isinstance(variables, dict) else 0
+        score -= min(variable_count, 8) * 0.15
+        score -= min(len(formulation), 240) / 240.0
+        return score
 
     async def direct_exp_gen(self, prev_out):
         if self.mined_factor_count >= self.batch_size:
@@ -60,6 +111,14 @@ class FactorMiningLoop(FactorRDLoop):
 
         result = await super().direct_exp_gen(prev_out)
         exp = result["exp_gen"]
+        if getattr(exp, "sub_tasks", None):
+            ordered_pairs = sorted(
+                zip(exp.sub_tasks, exp.sub_workspace_list),
+                key=lambda pair: self._task_priority_score(pair[0]),
+                reverse=True,
+            )
+            exp.sub_tasks = [task for task, _ in ordered_pairs]
+            exp.sub_workspace_list = [workspace for _, workspace in ordered_pairs]
         remaining = self.batch_size - self.mined_factor_count
         if len(exp.sub_tasks) > remaining:
             logger.info(
@@ -78,21 +137,37 @@ class FactorMiningLoop(FactorRDLoop):
 
         for task, workspace, feedback in zip(exp.sub_tasks, exp.sub_workspace_list, exp.prop_dev_feedback):
             reviewed_count += 1
-            if workspace is None or feedback is None or not bool(feedback.final_decision):
+            if workspace is None or feedback is None:
+                self._record_failed_factor(task, failure_reason="missing_workspace_or_feedback")
+                continue
+            if not bool(feedback.final_decision):
+                self._record_failed_factor(
+                    task,
+                    failure_reason="implementation_failed_after_iterations",
+                    tags=_infer_factor_registry_tags(task, feedback),
+                )
                 continue
             try:
                 _, df = workspace.execute("All")
             except Exception as exc:  # noqa: BLE001
                 logger.warning(f"Failed to reload factor dataframe for reviewed export: task={task.factor_name}; {exc}")
+                self._record_failed_factor(task, failure_reason="execution_failed_on_full_data")
                 continue
             if df is None or df.empty:
+                self._record_failed_factor(task, failure_reason="empty_factor_output")
                 continue
 
-            ic_feedback, full_sample_ic = evaluate_factor_ic_from_workspace(workspace, data_type="All")
+            ic_feedback, full_sample_ic = evaluate_factor_ic_from_workspace(workspace, data_type="All", gen_df=df)
             if full_sample_ic is None or abs(full_sample_ic) < FACTOR_COSTEER_SETTINGS.min_abs_ic:
                 logger.info(
                     f"Skip reviewed export for factor {task.factor_name} because full-sample IC did not pass. "
                     f"{ic_feedback}"
+                )
+                self._record_failed_factor(
+                    task,
+                    failure_reason="low_ic_after_iterations" if full_sample_ic is not None else "ic_unavailable",
+                    ic_score=full_sample_ic,
+                    tags=_infer_factor_registry_tags(task, feedback),
                 )
                 continue
 
@@ -120,7 +195,14 @@ class FactorMiningLoop(FactorRDLoop):
         return exported_count, reviewed_count
 
     def coding(self, prev_out: dict[str, Any]):
-        exp = self.coder.develop(prev_out["direct_exp_gen"]["exp_gen"])
+        exp = prev_out["direct_exp_gen"]["exp_gen"]
+        try:
+            exp = self.coder.develop(exp)
+        except CoderError as exc:
+            logger.warning(
+                "Factor coding batch finished without any acceptable tasks in this round; "
+                f"record failures and continue mining. {exc}"
+            )
         exported_count, reviewed_count = self._review_and_export_accepted_factors(exp)
         exp.accepted_exported_count = exported_count
         exp.reviewed_factor_count = reviewed_count

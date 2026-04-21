@@ -330,11 +330,13 @@ def evaluate_factor_ic_from_workspace(
     implementation: Workspace,
     *,
     data_type: str = "Debug",
+    gen_df: pd.DataFrame | None = None,
 ) -> tuple[str, float | None]:
-    try:
-        _, gen_df = implementation.execute(data_type)
-    except Exception as exc:  # noqa: BLE001
-        return f"IC evaluation failed because factor execution raised an exception: {exc}", None
+    if gen_df is None:
+        try:
+            _, gen_df = implementation.execute(data_type)
+        except Exception as exc:  # noqa: BLE001
+            return f"IC evaluation failed because factor execution raised an exception: {exc}", None
     if gen_df is None or gen_df.empty:
         return "IC evaluation skipped because no valid factor dataframe was generated.", None
 
