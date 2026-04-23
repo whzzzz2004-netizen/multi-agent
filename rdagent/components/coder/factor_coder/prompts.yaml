@@ -77,16 +77,23 @@ evolving_strategy_factor_implementation_v1_system: |-
       df = pd.read_hdf(DATA_DIR / "daily_pv.h5", key="data")
 
       # Calculate your factor here
-      # Example: 10-day momentum
-      # df['momentum'] = df.groupby(level='instrument')['$close'].pct_change(10)
+      # For daily rolling calculations on MultiIndex data:
+      # df['FACTOR_NAME'] = df.groupby(level='instrument')['$close'].pct_change(10)
+      #
+      # For minute-to-daily aggregation:
+      # minute_df = df.reset_index()
+      # minute_df['date'] = minute_df['datetime'].dt.normalize()
+      # daily_factor = minute_df.groupby(['date', 'instrument'])['$volume'].sum().reset_index()
+      # daily_factor = daily_factor.rename(columns={'date': 'datetime', '$volume': 'FACTOR_NAME'})
+      # df = daily_factor.set_index(['datetime', 'instrument'])
 
       # Handle missing and infinite values
-      df['['<factor_column>'] = df['['<factor_column>'].replace([np.inf, -np.inf], np.nan)
+      df['<factor_column>'] = df['<factor_column>'].replace([np.inf, -np.inf], np.nan)
 
       # IMPORTANT: Keep the MultiIndex when saving
       # Select only the factor column and save
-      result_df = df[['['<factor_column>']].copy()
-      result_df.columns = [' ['<Factor_Name>']
+      result_df = df[['<factor_column>']].copy()
+      result_df.columns = ['<Factor_Name>']
 
       # Save to HDF5 - the MultiIndex ['datetime', 'instrument'] will be preserved
       result_df.to_hdf("result.h5", key="data")
@@ -96,13 +103,18 @@ evolving_strategy_factor_implementation_v1_system: |-
   ```
 
   IMPORTANT RULES:
-  1. ALWAYS use groupby(level='instrument') when doing rolling calculations
-  2. NEVER use unstack() - it breaks the MultiIndex structure
-  3. ALWAYS handle np.inf and -np.inf values by replacing with np.nan
-  4. The result MUST have MultiIndex ['datetime', 'instrument']
-  5. The result should have only ONE column with the factor name
-  6. NEVER use future information such as shift(-1), pct_change(-n), diff(-n), centered rolling windows, or backward fill
-  7. You may use either daily or minute-level source files, but the final output MUST be daily: one factor value per trading day and instrument
+  1. For daily rolling calculations on MultiIndex data, prefer groupby(level='instrument')
+  2. For minute-to-daily aggregation, reset_index() first, create a date column, and group by ['date', 'instrument']
+  3. NEVER create a column named 'datetime' or 'instrument' unless you have reset the index first
+  4. After minute-to-daily aggregation, rename date -> datetime only once, then set_index(['datetime', 'instrument'])
+  5. NEVER use unstack() unless it is absolutely necessary and you restore the final MultiIndex ['datetime', 'instrument'] before saving
+  6. ALWAYS handle np.inf and -np.inf values by replacing with np.nan
+  7. The result MUST have MultiIndex ['datetime', 'instrument']
+  8. The result should have only ONE column with the factor name
+  9. NEVER use future information such as shift(-1), pct_change(-n), diff(-n), centered rolling windows, or backward fill
+  10. You may use either daily or minute-level source files, but the final output MUST be daily: one factor value per trading day and instrument
+  11. ONLY use files and columns explicitly listed in the scenario's source data description. Do NOT assume extra tables, extra fields, fundamentals, financial statements, analyst expectations, industry labels, market cap, or any hidden data exist
+  12. If the factor clearly requires unavailable data, do not try to fake it with guessed fields or invented formulas. Keep the implementation aligned to the actually available source data only
 
   Please response the code in the following json format. Here is an example structure for the JSON output:
   {
@@ -130,16 +142,6 @@ evolving_strategy_factor_implementation_v2_user: |-
   After reviewing some similar errors and their solutions, here are some suggestions for you to correct your code:
   {{error_summary_critics}}
   {% endif %}
-  {% endif %}
-  {% if queried_similar_successful_knowledge|length != 0 %}
-  Here are some success implements of similar component tasks, take them as references:
-  --------------Correct code to similar factors:---------------
-  {% for similar_successful_knowledge in queried_similar_successful_knowledge %}
-  =====Factor {{loop.index}}:=====
-  {{ similar_successful_knowledge.target_task.get_task_information() }}
-  =====Code:=====
-  {{ similar_successful_knowledge.implementation.all_codes }}
-  {% endfor %}
   {% endif %}
   {% if latest_attempt_to_latest_successful_execution is not none %}
   You have tried to correct your former failed code but still met some errors. Here is the latest attempt to the latest successful execution, try not to get the same error to your new code:

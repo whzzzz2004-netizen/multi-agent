@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Dict, Tuple
 
 import fire
+import pandas as pd
 
 from rdagent.app.qlib_rd_loop.conf import FACTOR_FROM_REPORT_PROP_SETTING
 from rdagent.app.qlib_rd_loop.factor import FactorRDLoop
@@ -23,6 +24,42 @@ from rdagent.scenarios.qlib.factor_experiment_loader.pdf_loader import (
 )
 from rdagent.utils.agent.tpl import T
 from rdagent.utils.workflow import LoopMeta
+
+
+def _load_processed_report_paths() -> set[str]:
+    manifest_path = Path.cwd() / "git_ignore_folder" / "factor_outputs" / "manifest.csv"
+    if not manifest_path.exists():
+        return set()
+    try:
+        manifest = pd.read_csv(manifest_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Failed to read factor manifest for processed report detection: {exc}")
+        return set()
+    if "source_report_path" not in manifest.columns:
+        return set()
+    if "source_type" in manifest.columns:
+        source_type = manifest["source_type"].astype(str).str.lower()
+        manifest = manifest[source_type == "literature_report"]
+    processed_paths = {
+        str(Path(path).resolve())
+        for path in manifest["source_report_path"].dropna().astype(str).tolist()
+        if path.strip()
+    }
+    return processed_paths
+
+
+def list_unprocessed_report_paths(report_folder: str | Path) -> list[Path]:
+    processed_report_paths = _load_processed_report_paths()
+    folder = Path(report_folder)
+    if not folder.exists():
+        return []
+    result: list[Path] = []
+    for item in folder.rglob("*.pdf"):
+        path = item.resolve()
+        if str(path) in processed_report_paths:
+            continue
+        result.append(path)
+    return sorted(result)
 
 
 def generate_hypothesis(factor_result: dict, report_content: str) -> str:
@@ -94,6 +131,7 @@ def extract_hypothesis_and_exp_from_reports(
         docs_dict,
         skip_report_classification=minimal_mode,
         skip_factor_viability_check=minimal_mode,
+        single_pass_extraction=minimal_mode,
     )
     if exp is None or exp.sub_tasks == []:
         return None
@@ -124,15 +162,32 @@ def extract_hypothesis_and_exp_from_reports(
 
 
 class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
-    def __init__(self, report_folder: str = None, minimal_mode: bool = True):
+    def __init__(self, report_folder: str = None, minimal_mode: bool = True, report_paths: list[str] | None = None):
         super().__init__(PROP_SETTING=FACTOR_FROM_REPORT_PROP_SETTING)
         self.minimal_mode = minimal_mode
-        if report_folder is None:
-            self.judge_pdf_data_items = json.load(
+        if hasattr(self, "coder") and getattr(self.coder, "settings", None) is not None:
+            self.coder.settings.v2_query_component_limit = 0
+            self.coder.settings.v2_knowledge_sampler = 0.0
+        processed_report_paths = _load_processed_report_paths()
+        if report_paths is not None:
+            raw_items = report_paths
+        elif report_folder is None:
+            raw_items = json.load(
                 open(FACTOR_FROM_REPORT_PROP_SETTING.report_result_json_file_path, "r")
             )
         else:
-            self.judge_pdf_data_items = [i for i in Path(report_folder).rglob("*.pdf")]
+            raw_items = [i for i in Path(report_folder).rglob("*.pdf")]
+
+        normalized_items: list[Path] = []
+        for item in raw_items:
+            path = Path(item).resolve()
+            if str(path) in processed_report_paths:
+                continue
+            normalized_items.append(path)
+        self.judge_pdf_data_items = normalized_items
+        skipped_count = max(len(raw_items) - len(self.judge_pdf_data_items), 0)
+        if skipped_count > 0:
+            logger.info(f"Skipped {skipped_count} already-processed report(s) based on factor manifest.")
 
         self.loop_n = min(len(self.judge_pdf_data_items), FACTOR_FROM_REPORT_PROP_SETTING.report_limit)
         self.shift_report = (
@@ -268,7 +323,7 @@ def _infer_report_factor_registry_tags(task, feedback) -> list[str]:
     return sorted(tags)
 
 
-def main(report_folder=None, path=None, all_duration=None, checkout=True, minimal_mode=True):
+def main(report_folder=None, path=None, all_duration=None, checkout=True, minimal_mode=True, report_paths=None):
     """
     Auto R&D Evolving loop for fintech factors (the factors are extracted from finance reports).
 
@@ -277,12 +332,16 @@ def main(report_folder=None, path=None, all_duration=None, checkout=True, minima
         path (str, optional): The path for loading a session. If provided, the session will be loaded.
         step_n (int, optional): Step number to continue running a session.
     """
-    if path is None and report_folder is None:
+    if path is None and report_folder is None and report_paths is None:
         model_loop = FactorReportLoop(minimal_mode=minimal_mode)
     elif path is not None:
         model_loop = FactorReportLoop.load(path, checkout=checkout)
     else:
-        model_loop = FactorReportLoop(report_folder=report_folder, minimal_mode=minimal_mode)
+        model_loop = FactorReportLoop(
+            report_folder=report_folder,
+            minimal_mode=minimal_mode,
+            report_paths=report_paths,
+        )
 
     asyncio.run(model_loop.run(all_duration=all_duration))
 

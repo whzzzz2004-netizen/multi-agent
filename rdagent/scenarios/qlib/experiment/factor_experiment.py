@@ -10,7 +10,10 @@ from rdagent.components.coder.factor_coder.factor import (
 )
 from rdagent.core.experiment import Task
 from rdagent.core.scenario import Scenario
-from rdagent.scenarios.qlib.experiment.utils import factor_mode_instruction, get_data_folder_intro, resolve_factor_data_mode
+from rdagent.scenarios.qlib.experiment.utils import (
+    get_compact_data_folder_intro,
+    get_data_folder_intro,
+)
 from rdagent.scenarios.qlib.experiment.workspace import QlibFBWorkspace
 from rdagent.scenarios.shared.get_runtime_info import get_runtime_environment_by_env
 from rdagent.utils.agent.tpl import T
@@ -35,8 +38,8 @@ class QlibFactorScenario(Scenario):
                 runtime_environment=self.get_runtime_environment(),
             )
         )
-        self._background += "\n\n" + factor_mode_instruction(resolve_factor_data_mode())
         self._source_data = deepcopy(get_data_folder_intro())
+        self._compact_source_data = deepcopy(get_compact_data_folder_intro())
         self._output_format = deepcopy(T(".prompts:qlib_factor_output_format").r())
         self._interface = deepcopy(T(".prompts:qlib_factor_interface").r())
         self._strategy = deepcopy(T(".prompts:qlib_factor_strategy").r())
@@ -57,8 +60,8 @@ class QlibFactorScenario(Scenario):
     def background(self) -> str:
         return self._background
 
-    def get_source_data_desc(self, task: Task | None = None) -> str:
-        return self._source_data
+    def get_source_data_desc(self, task: Task | None = None, compact: bool = False) -> str:
+        return self._compact_source_data if compact else self._source_data
 
     @property
     def output_format(self) -> str:
@@ -87,6 +90,12 @@ class QlibFactorScenario(Scenario):
         if simple_background:
             return f"""Background of the scenario:
 {self.background}"""
+        if filtered_tag == "feature":
+            return f"""Background of the scenario:
+{self.background}
+The source data you can use:
+{self.get_source_data_desc(task, compact=True)}
+"""
         return f"""Background of the scenario:
 {self.background}
 The source data you can use:

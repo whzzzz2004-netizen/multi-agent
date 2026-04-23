@@ -371,3 +371,28 @@ def get_data_folder_intro(fname_reg: str = ".*", flags=0, variable_mapping=None)
             else:
                 content_l.append(get_file_desc(p))
     return factor_mode_instruction(mode) + "\n\n" + "\n----------------- file splitter -------------\n".join(content_l)
+
+
+def get_compact_data_folder_intro() -> str:
+    mode = resolve_factor_data_mode()
+    compact_desc = {
+        "daily": (
+            "Available source files:\n"
+            "- daily_pv.h5: adjusted daily OHLCV and factor columns with MultiIndex ['datetime', 'instrument'].\n"
+            "- README.md: brief schema reference."
+        ),
+        "minute": (
+            "Available source files:\n"
+            "- minute_pv.h5: minute OHLCV, volume, VWAP with MultiIndex ['datetime', 'instrument'].\n"
+            "- minute_quote.h5: minute bid/ask, sizes, mid_price, spread_bps with MultiIndex ['datetime', 'instrument'].\n"
+            "- README.md: brief schema reference."
+        ),
+        "all": (
+            "Available source files:\n"
+            "- daily_pv.h5: daily OHLCV.\n"
+            "- minute_pv.h5: minute OHLCV and VWAP.\n"
+            "- minute_quote.h5: minute bid/ask sample.\n"
+            "- README.md: brief schema reference."
+        ),
+    }
+    return factor_mode_instruction(mode) + "\n\n" + compact_desc[mode]

@@ -612,6 +612,9 @@ class CoSTEERRAGStrategyV2(CoSTEERRAGStrategy):
     ) -> CoSTEERQueriedKnowledge | None:
         for target_task in evo.sub_tasks:
             target_task_information = target_task.get_task_information()
+            if v2_query_component_limit <= 0 and knowledge_sampler <= 0:
+                queried_knowledge_v2.task_to_similar_task_successful_knowledge[target_task_information] = []
+                continue
             if (
                 target_task_information in self.knowledgebase.success_task_to_knowledge_dict
                 or target_task_information in queried_knowledge_v2.failed_task_info_set
@@ -673,32 +676,35 @@ class CoSTEERRAGStrategyV2(CoSTEERRAGStrategy):
                             ].append(target_knowledge)
 
                 # finally add embedding related knowledge
-                same_family_success_knowledge = self._filter_success_knowledge_by_task_family(target_task)
-                knowledge_base_success_task_list = list(same_family_success_knowledge)
+                if knowledge_sampler > 0 and v2_query_component_limit > 0:
+                    same_family_success_knowledge = self._filter_success_knowledge_by_task_family(target_task)
+                    knowledge_base_success_task_list = list(same_family_success_knowledge)
 
-                embedding_similar_successful_knowledge = []
-                if knowledge_base_success_task_list:
-                    similarity = calculate_embedding_distance_between_str_list(
-                        [target_task_information],
-                        knowledge_base_success_task_list,
-                    )[0]
-                    similar_indexes = sorted(
-                        range(len(similarity)),
-                        key=lambda i: similarity[i],
-                        reverse=True,
-                    )
-                    embedding_similar_successful_knowledge = [
-                        same_family_success_knowledge[knowledge_base_success_task_list[index]]
-                        for index in similar_indexes
-                    ]
-                for knowledge in embedding_similar_successful_knowledge:
-                    if (
-                        knowledge
-                        not in queried_knowledge_v2.task_to_similar_task_successful_knowledge[target_task_information]
-                    ):
-                        queried_knowledge_v2.task_to_similar_task_successful_knowledge[target_task_information].append(
-                            knowledge
+                    embedding_similar_successful_knowledge = []
+                    if knowledge_base_success_task_list:
+                        similarity = calculate_embedding_distance_between_str_list(
+                            [target_task_information],
+                            knowledge_base_success_task_list,
+                        )[0]
+                        similar_indexes = sorted(
+                            range(len(similarity)),
+                            key=lambda i: similarity[i],
+                            reverse=True,
                         )
+                        embedding_similar_successful_knowledge = [
+                            same_family_success_knowledge[knowledge_base_success_task_list[index]]
+                            for index in similar_indexes
+                        ]
+                    for knowledge in embedding_similar_successful_knowledge:
+                        if (
+                            knowledge
+                            not in queried_knowledge_v2.task_to_similar_task_successful_knowledge[
+                                target_task_information
+                            ]
+                        ):
+                            queried_knowledge_v2.task_to_similar_task_successful_knowledge[
+                                target_task_information
+                            ].append(knowledge)
 
                 if knowledge_sampler > 0:
                     queried_knowledge_v2.task_to_similar_task_successful_knowledge[target_task_information] = [

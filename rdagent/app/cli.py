@@ -32,6 +32,11 @@ minute_factor_app = typer.Typer()
 paper_factor_app = typer.Typer()
 DEFAULT_PAPER_REPORT_FOLDER = str(Path.cwd() / "papers" / "inbox")
 DEFAULT_FACTOR_IMPROVEMENT_FOLDER = str(Path.cwd() / "papers" / "factor_improvement")
+DEFAULT_FACTOR_PAPER_QUERY = (
+    "(cat:q-fin.ST OR cat:q-fin.PM OR cat:q-fin.TR) AND "
+    '(all:factor OR all:alpha OR all:predictor OR all:signal OR all:"return prediction" '
+    'OR all:"cross-sectional return")'
+)
 
 CheckoutOption = Annotated[bool, typer.Option("--checkout/--no-checkout", "-c/-C")]
 CheckEnvOption = Annotated[bool, typer.Option("--check-env/--no-check-env", "-e/-E")]
@@ -311,6 +316,27 @@ def paper_factor_entry(
         "--minimal-mode/--full-mode",
         help="Use the lowest-cost extraction path by skipping report classification and extra hypothesis generation.",
     ),
+    auto_fetch: bool = typer.Option(
+        True,
+        "--auto-fetch/--no-auto-fetch",
+        help="Automatically fetch the latest arXiv papers into the report folder before extraction.",
+    ),
+    fetch_query: str = typer.Option(
+        DEFAULT_FACTOR_PAPER_QUERY,
+        help="arXiv search query used when --auto-fetch is enabled.",
+    ),
+    fetch_max_results: int = typer.Option(
+        20,
+        help="Maximum number of recent arXiv papers to inspect per sync.",
+    ),
+    fetch_download_limit: Optional[int] = typer.Option(
+        None,
+        help="Maximum number of new PDFs to download during this sync. Defaults to all new matches.",
+    ),
+    fetch_days_back: int = typer.Option(
+        30,
+        help="Only fetch papers submitted within the last N days when --auto-fetch is enabled.",
+    ),
 ):
     paper_factor_cli(
         report_folder=report_folder,
@@ -318,6 +344,11 @@ def paper_factor_entry(
         all_duration=all_duration,
         checkout=checkout,
         minimal_mode=minimal_mode,
+        auto_fetch=auto_fetch,
+        fetch_query=fetch_query,
+        fetch_max_results=fetch_max_results,
+        fetch_download_limit=fetch_download_limit,
+        fetch_days_back=fetch_days_back,
     )
 
 
@@ -427,18 +458,129 @@ def paper_factor_cli(
         "--minimal-mode/--full-mode",
         help="Use the lowest-cost extraction path by skipping report classification and extra hypothesis generation.",
     ),
+    auto_fetch: bool = typer.Option(
+        True,
+        "--auto-fetch/--no-auto-fetch",
+        help="Automatically fetch the latest arXiv papers into the report folder before extraction.",
+    ),
+    fetch_query: str = typer.Option(
+        DEFAULT_FACTOR_PAPER_QUERY,
+        help="arXiv search query used when --auto-fetch is enabled.",
+    ),
+    fetch_max_results: int = typer.Option(
+        20,
+        help="Maximum number of recent arXiv papers to inspect per sync.",
+    ),
+    fetch_download_limit: Optional[int] = typer.Option(
+        None,
+        help="Maximum number of new PDFs to download during this sync. Defaults to all new matches.",
+    ),
+    fetch_days_back: int = typer.Option(
+        30,
+        help="Only fetch papers submitted within the last N days when --auto-fetch is enabled.",
+    ),
 ):
     from rdagent.app.qlib_rd_loop.factor_from_report import main as fin_factor_report
+    from rdagent.app.qlib_rd_loop.factor_from_report import list_unprocessed_report_paths
+    from rdagent.app.qlib_rd_loop.paper_fetcher import sync_latest_factor_papers
 
     _auto_init_workspace()
+    if path is not None:
+        with _temporary_env(LOG_LLM_CHAT_CONTENT="False"):
+            fin_factor_report(
+                report_folder=report_folder,
+                path=path,
+                all_duration=all_duration,
+                checkout=checkout,
+                minimal_mode=minimal_mode,
+            )
+        return
+
+    processed_count = 0
     with _temporary_env(LOG_LLM_CHAT_CONTENT="False"):
-        fin_factor_report(
-            report_folder=report_folder,
-            path=path,
-            all_duration=all_duration,
-            checkout=checkout,
-            minimal_mode=minimal_mode,
-        )
+        while True:
+            local_pending = list_unprocessed_report_paths(report_folder)
+            if local_pending:
+                next_report = str(local_pending[0])
+                typer.echo(f"Processing local pending paper: {next_report}")
+                fin_factor_report(
+                    report_folder=report_folder,
+                    all_duration=all_duration,
+                    checkout=checkout,
+                    minimal_mode=minimal_mode,
+                    report_paths=[next_report],
+                )
+                processed_count += 1
+                continue
+
+            if not auto_fetch:
+                break
+
+            try:
+                summary = sync_latest_factor_papers(
+                    target_dir=report_folder,
+                    query=fetch_query,
+                    max_results=fetch_max_results,
+                    download_limit=1 if fetch_download_limit is None else min(fetch_download_limit, 1),
+                    days_back=fetch_days_back,
+                )
+            except Exception as exc:  # noqa: BLE001
+                typer.echo(f"Auto-fetch failed, stop fetching new papers: {exc}")
+                break
+
+            if summary["downloaded_count"] <= 0:
+                typer.echo("No new factor papers to fetch.")
+                break
+
+            next_report = summary["downloaded_paths"][0]
+            typer.echo(f"Fetched and processing paper: {next_report}")
+            fin_factor_report(
+                report_folder=report_folder,
+                all_duration=all_duration,
+                checkout=checkout,
+                minimal_mode=minimal_mode,
+                report_paths=[next_report],
+            )
+            processed_count += 1
+
+    typer.echo(f"paper_factor finished after processing {processed_count} paper(s).")
+
+
+@app.command(name="sync_factor_papers")
+def sync_factor_papers_cli(
+    report_folder: str = typer.Option(
+        DEFAULT_PAPER_REPORT_FOLDER,
+        help="Folder where downloaded PDF papers will be stored.",
+    ),
+    fetch_query: str = typer.Option(
+        DEFAULT_FACTOR_PAPER_QUERY,
+        help="arXiv search query used to retrieve recent papers.",
+    ),
+    fetch_max_results: int = typer.Option(
+        20,
+        help="Maximum number of recent arXiv papers to inspect per sync.",
+    ),
+    fetch_download_limit: Optional[int] = typer.Option(
+        None,
+        help="Maximum number of new PDFs to download during this sync. Defaults to all new matches.",
+    ),
+    fetch_days_back: int = typer.Option(
+        30,
+        help="Only fetch papers submitted within the last N days.",
+    ),
+) -> None:
+    from rdagent.app.qlib_rd_loop.paper_fetcher import sync_latest_factor_papers
+
+    summary = sync_latest_factor_papers(
+        target_dir=report_folder,
+        query=fetch_query,
+        max_results=fetch_max_results,
+        download_limit=fetch_download_limit,
+        days_back=fetch_days_back,
+    )
+    typer.echo(f"Downloaded {summary['downloaded_count']} new paper(s) into {summary['target_dir']}")
+    typer.echo(f"Failed downloads: {summary.get('failed_count', 0)}")
+    typer.echo(f"Manifest: {summary['manifest_path']}")
 
 
 @app.command(name="knowledge_map")

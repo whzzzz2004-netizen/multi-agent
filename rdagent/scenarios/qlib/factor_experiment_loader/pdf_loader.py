@@ -148,6 +148,18 @@ def __extract_factors_name_and_desc_from_content(
     return extracted_factor_dict
 
 
+def __extract_core_factors_from_content(
+    content: str,
+) -> dict[str, dict[str, dict[str, str] | str]]:
+    response = APIBackend().build_messages_and_create_chat_completion(
+        system_prompt=T(".prompts:extract_core_factors_system").r(),
+        user_prompt=T(".prompts:extract_core_factors_user").r(report_content=content),
+        json_mode=True,
+    )
+    result = json.loads(response)
+    return result if isinstance(result, dict) else {"summary": "", "factors": {}}
+
+
 def __extract_factors_formulation_from_content(
     content: str,
     factor_dict: dict[str, str],
@@ -226,10 +238,39 @@ def __extract_factor_and_formulation_from_one_report(
     return final_factor_dict_to_one_report
 
 
+def __extract_core_factor_dict_from_one_report(
+    content: str,
+) -> dict[str, dict[str, str]]:
+    response = __extract_core_factors_from_content(content)
+    factor_dict = response.get("factors", {}) or {}
+    final_factor_dict_to_one_report: dict[str, dict[str, str]] = {}
+    for factor_name, factor_data in factor_dict.items():
+        if not isinstance(factor_data, dict):
+            continue
+        formulation = factor_data.get("formulation")
+        variables = factor_data.get("variables")
+        description = factor_data.get("description")
+        if not factor_name or not description or not formulation or not isinstance(variables, dict):
+            continue
+        normalized_formulation = formulation
+        if factor_name in normalized_formulation:
+            normalized_formulation = normalized_formulation.replace(factor_name, factor_name.replace("_", r"\_"))
+        for variable in variables:
+            if variable in normalized_formulation:
+                normalized_formulation = normalized_formulation.replace(variable, variable.replace("_", r"\_"))
+        final_factor_dict_to_one_report[factor_name] = {
+            "description": description,
+            "formulation": normalized_formulation,
+            "variables": variables,
+        }
+    return final_factor_dict_to_one_report
+
+
 def extract_factors_from_report_dict(
     report_dict: dict[str, str],
     useful_no_dict: dict[str, dict[str, str]],
     n_proc: int = 11,
+    single_pass: bool = False,
 ) -> dict[str, dict[str, dict[str, str]]]:
     useful_report_dict = {}
     for key, value in useful_no_dict.items():
@@ -244,7 +285,10 @@ def extract_factors_from_report_dict(
     final_report_factor_dict = {}
     factor_dict_list = multiprocessing_wrapper(
         [
-            (__extract_factor_and_formulation_from_one_report, (useful_report_dict[file_name],))
+            (
+                __extract_core_factor_dict_from_one_report if single_pass else __extract_factor_and_formulation_from_one_report,
+                (useful_report_dict[file_name],),
+            )
             for file_name in file_name_list
         ],
         n=RD_AGENT_SETTINGS.multi_proc_n,
@@ -581,6 +625,7 @@ class FactorExperimentLoaderFromPDFfiles(FactorExperimentLoader):
         *,
         skip_report_classification: bool = False,
         skip_factor_viability_check: bool = False,
+        single_pass_extraction: bool = False,
     ) -> QlibFactorExperiment:
         with logger.tag("docs"):
             logger.log_object(_summarize_docs_dict(docs_dict))
@@ -591,7 +636,11 @@ class FactorExperimentLoaderFromPDFfiles(FactorExperimentLoader):
             selected_report_dict = classify_report_from_dict(report_dict=docs_dict, vote_time=1)
 
         with logger.tag("file_to_factor_result"):
-            file_to_factor_result = extract_factors_from_report_dict(docs_dict, selected_report_dict)
+            file_to_factor_result = extract_factors_from_report_dict(
+                docs_dict,
+                selected_report_dict,
+                single_pass=single_pass_extraction,
+            )
             logger.log_object(file_to_factor_result)
 
         with logger.tag("factor_dict"):

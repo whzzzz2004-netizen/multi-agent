@@ -125,11 +125,7 @@ class FactorMultiProcessEvolvingStrategy(MultiProcessEvolvingStrategy):
     ) -> str:
         target_factor_task_information = target_task.get_task_information()
 
-        queried_similar_successful_knowledge = (
-            queried_knowledge.task_to_similar_task_successful_knowledge[target_factor_task_information]
-            if queried_knowledge is not None
-            else []
-        )  # A list, [success task implement knowledge]
+        queried_similar_successful_knowledge = []
 
         if isinstance(queried_knowledge, CoSTEERQueriedKnowledgeV2):
             queried_similar_error_knowledge = (
@@ -188,10 +184,6 @@ class FactorMultiProcessEvolvingStrategy(MultiProcessEvolvingStrategy):
                 break
             elif len(queried_former_failed_knowledge_to_render) > 1:
                 queried_former_failed_knowledge_to_render = queried_former_failed_knowledge_to_render[1:]
-            elif len(queried_similar_successful_knowledge_to_render) > len(
-                queried_similar_error_knowledge_to_render,
-            ):
-                queried_similar_successful_knowledge_to_render = queried_similar_successful_knowledge_to_render[:-1]
             elif len(queried_similar_error_knowledge_to_render) > 0:
                 queried_similar_error_knowledge_to_render = queried_similar_error_knowledge_to_render[:-1]
         for _ in range(10):
