@@ -579,6 +579,17 @@ class APIBackend(ABC):
                             "switch to the built-in-model path that avoids custom model-code feedback embeddings."
                         ) from e
 
+                    provider_config_error = (
+                        "Provider List: https://docs.litellm.ai/docs/providers" in str(e)
+                        or "LLM Provider NOT provided" in str(e)
+                        or ("litellm.BadRequestError" in str(e) and "provider" in str(e).lower())
+                    )
+                    if provider_config_error:
+                        raise RuntimeError(
+                            "LiteLLM provider/model configuration failed before a valid model request completed. "
+                            f"Original error: {e}"
+                        ) from e
+
                     RD_Agent_TIMER_wrapper.api_fail_count += 1
                     RD_Agent_TIMER_wrapper.latest_api_fail_time = datetime.now(pytz.timezone("Asia/Shanghai"))
 
@@ -651,8 +662,21 @@ class APIBackend(ABC):
         Call the chat completion function and automatically continue the conversation if the finish_reason is length.
         """
 
+        original_response_format = response_format
+
         if response_format is None and json_mode:
             response_format = {"type": "json_object"}
+
+        # For backends/models that do not support native response_schema (e.g. current
+        # DeepSeek path via LiteLLM), degrade to JSON mode but keep downstream schema
+        # validation so callers still get structured-output guarantees.
+        if response_format is not None and response_format != {"type": "json_object"} and not self.supports_response_schema():
+            logger.warning(
+                "Current backend/model does not support native response_schema. "
+                "Falling back to JSON-object mode with post-parse validation."
+            )
+            response_format = {"type": "json_object"}
+            add_json_in_prompt = True
 
         # 0) return directly if cache is hit
         if seed is None and LLM_SETTINGS.use_auto_chat_cache_seed_gen:
@@ -730,10 +754,10 @@ class APIBackend(ABC):
             )
             all_response = code_parser.parse(all_response)
 
-        if response_format is not None:
-            if not isinstance(response_format, dict) and issubclass(response_format, BaseModel):
+        if original_response_format is not None:
+            if not isinstance(original_response_format, dict) and issubclass(original_response_format, BaseModel):
                 # It may raise TypeError if initialization fails
-                response_format(**json.loads(all_response))
+                original_response_format(**json.loads(all_response))
             elif response_format == {"type": "json_object"}:
                 logger.info(f"Using OpenAI response format: {response_format}")
             else:

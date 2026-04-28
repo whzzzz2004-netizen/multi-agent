@@ -53,6 +53,36 @@ class LiteLLMAPIBackend(APIBackend):
     """LiteLLM implementation of APIBackend interface"""
 
     _has_logged_settings: bool = False
+    _response_schema_warned_models: set[str] = set()
+
+    @staticmethod
+    def _uses_openai_compatible_custom_endpoint() -> bool:
+        api_base = LITELLM_SETTINGS.chat_openai_base_url or LITELLM_SETTINGS.openai_api_base or ""
+        return "compatible-mode" in api_base
+
+    @staticmethod
+    def _approx_token_count_from_messages(messages: list[dict[str, Any]]) -> int:
+        text = "\n".join(str(message.get("content", "")) for message in messages)
+        return max(1, len(text) // 4)
+
+    @staticmethod
+    def _safe_supports_response_schema(model: str) -> bool:
+        if LiteLLMAPIBackend._uses_openai_compatible_custom_endpoint():
+            return False
+        try:
+            return bool(supports_response_schema(model=model))
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"LiteLLM could not infer response-schema support for model {model}: {exc}. "
+                "Fallback to response_format disabled."
+            )
+            return False
+
+    @staticmethod
+    def _compose_provider_model(model: str, custom_llm_provider: str | None) -> str:
+        if custom_llm_provider:
+            return f"{custom_llm_provider}/{model}"
+        return model
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         if not self.__class__._has_logged_settings:
@@ -65,10 +95,24 @@ class LiteLLMAPIBackend(APIBackend):
         """
         Calculate the token count from messages
         """
-        num_tokens = token_counter(
-            model=LITELLM_SETTINGS.chat_model,
-            messages=messages,
-        )
+        if self._uses_openai_compatible_custom_endpoint():
+            num_tokens = self._approx_token_count_from_messages(messages)
+            logger.info(
+                f"{LogColors.CYAN}Token count (approx for compatible endpoint): {LogColors.END} {num_tokens}",
+                tag="debug_litellm_token",
+            )
+            return num_tokens
+        try:
+            num_tokens = token_counter(
+                model=LITELLM_SETTINGS.chat_model,
+                messages=messages,
+            )
+        except Exception as exc:  # noqa: BLE001
+            num_tokens = self._approx_token_count_from_messages(messages)
+            logger.warning(
+                f"LiteLLM token counting failed for model {LITELLM_SETTINGS.chat_model}: {exc}. "
+                f"Fallback approximate token count={num_tokens}."
+            )
         logger.info(f"{LogColors.CYAN}Token count: {LogColors.END} {num_tokens}", tag="debug_litellm_token")
         return num_tokens
 
@@ -214,6 +258,28 @@ class LiteLLMAPIBackend(APIBackend):
         temperature: float
         max_tokens: int | None
         reasoning_effort: Literal["low", "medium", "high"] | None
+        api_base: str | None
+        api_key: str | None
+        custom_llm_provider: str | None
+
+    @staticmethod
+    def _resolve_chat_connection_settings(model: str) -> tuple[str, str | None, str | None, str | None]:
+        api_base = LITELLM_SETTINGS.chat_openai_base_url or LITELLM_SETTINGS.openai_api_base or None
+        api_key = LITELLM_SETTINGS.chat_openai_api_key or LITELLM_SETTINGS.openai_api_key or None
+        custom_llm_provider = None
+        resolved_model = model
+
+        if "/" in model:
+            provider, candidate_model = model.split("/", 1)
+            if provider.strip() and candidate_model.strip():
+                custom_llm_provider = provider.strip()
+                resolved_model = candidate_model.strip()
+
+        if custom_llm_provider is None and api_base and "dashscope.aliyuncs.com/compatible-mode" in api_base:
+            # DashScope here exposes an OpenAI-compatible chat/completions API.
+            custom_llm_provider = "openai"
+
+        return resolved_model, api_base, api_key, custom_llm_provider
 
     def get_complete_kwargs(self) -> CompleteKwargs:
         """
@@ -240,11 +306,15 @@ class LiteLLMAPIBackend(APIBackend):
                         else:
                             reasoning_effort = None
                     break
+        model, api_base, api_key, custom_llm_provider = self._resolve_chat_connection_settings(model)
         return self.CompleteKwargs(
             model=model,
             temperature=temperature,
             max_tokens=max_tokens,
             reasoning_effort=reasoning_effort,
+            api_base=api_base,
+            api_key=api_key,
+            custom_llm_provider=custom_llm_provider,
         )
 
     def _create_chat_completion_inner_function(  # type: ignore[no-untyped-def] # noqa: C901, PLR0912, PLR0915
@@ -258,12 +328,24 @@ class LiteLLMAPIBackend(APIBackend):
         Call the chat completion function
         """
 
-        if response_format and not supports_response_schema(model=LITELLM_SETTINGS.chat_model):
+        response_schema_probe_model, _, _, _ = self._resolve_chat_connection_settings(LITELLM_SETTINGS.chat_model)
+        _, _, _, response_schema_probe_provider = self._resolve_chat_connection_settings(LITELLM_SETTINGS.chat_model)
+        response_schema_probe_model = self._compose_provider_model(
+            response_schema_probe_model,
+            response_schema_probe_provider,
+        )
+        # DeepSeek models usually do not support OpenAI response_schema in LiteLLM.
+        if response_format and (
+            response_schema_probe_provider == "deepseek"
+            or not self._safe_supports_response_schema(response_schema_probe_model)
+        ):
             # Deepseek will enter this branch
-            logger.warning(
-                f"{LogColors.YELLOW}Model {LITELLM_SETTINGS.chat_model} does not support response schema, ignoring response_format argument.{LogColors.END}",
-                tag="llm_messages",
-            )
+            if LITELLM_SETTINGS.chat_model not in self._response_schema_warned_models:
+                logger.warning(
+                    f"{LogColors.YELLOW}Model {LITELLM_SETTINGS.chat_model} does not support response schema, ignoring response_format argument.{LogColors.END}",
+                    tag="llm_messages",
+                )
+                self._response_schema_warned_models.add(LITELLM_SETTINGS.chat_model)
             response_format = None
 
         if response_format:
@@ -274,6 +356,7 @@ class LiteLLMAPIBackend(APIBackend):
 
         complete_kwargs = self.get_complete_kwargs()
         model = complete_kwargs["model"]
+        model_for_stats = self._compose_provider_model(model, complete_kwargs.get("custom_llm_provider"))
 
         response = completion(
             messages=messages,
@@ -316,24 +399,30 @@ class LiteLLMAPIBackend(APIBackend):
                 )
 
         global ACC_COST
-        try:
-            cost = completion_cost(model=model, messages=messages, completion=content)
-        except Exception as e:
-            logger.warning(f"Cost calculation failed for model {model}: {e}. Skip cost statistics.")
+        custom_provider = complete_kwargs.get("custom_llm_provider")
+        if self._uses_openai_compatible_custom_endpoint() or custom_provider == "deepseek":
             cost = np.nan
+            prompt_tokens = self._approx_token_count_from_messages(messages)
+            completion_tokens = max(1, len(content) // 4) if content else 0
         else:
-            ACC_COST += cost
-            if LITELLM_SETTINGS.log_llm_chat_content:
-                logger.info(
-                    f"Current Cost: ${float(cost):.10f}; Accumulated Cost: ${float(ACC_COST):.10f}; {finish_reason=}",
-                )
-        try:
-            prompt_tokens = token_counter(model=model, messages=messages)
-            completion_tokens = token_counter(model=model, text=content)
-        except ValueError as e:
-            logger.warning(f"Token counting failed for model {model}: {e}. Skip token statistics.")
-            prompt_tokens = 0
-            completion_tokens = 0
+            try:
+                cost = completion_cost(model=model_for_stats, messages=messages, completion=content)
+            except Exception as e:
+                logger.warning(f"Cost calculation failed for model {model_for_stats}: {e}. Skip cost statistics.")
+                cost = np.nan
+            else:
+                ACC_COST += cost
+                if LITELLM_SETTINGS.log_llm_chat_content:
+                    logger.info(
+                        f"Current Cost: ${float(cost):.10f}; Accumulated Cost: ${float(ACC_COST):.10f}; {finish_reason=}",
+                    )
+            try:
+                prompt_tokens = token_counter(model=model_for_stats, messages=messages)
+                completion_tokens = token_counter(model=model_for_stats, text=content)
+            except ValueError as e:
+                logger.warning(f"Token counting failed for model {model_for_stats}: {e}. Skip token statistics.")
+                prompt_tokens = 0
+                completion_tokens = 0
         logger.log_object(
             {
                 "model": model,
@@ -350,11 +439,15 @@ class LiteLLMAPIBackend(APIBackend):
         """
         Check if the backend supports function calling
         """
-        return supports_response_schema(model=LITELLM_SETTINGS.chat_model) and LITELLM_SETTINGS.enable_response_schema
+        probe_model, _, _, probe_provider = self._resolve_chat_connection_settings(LITELLM_SETTINGS.chat_model)
+        probe_model = self._compose_provider_model(probe_model, probe_provider)
+        return self._safe_supports_response_schema(probe_model) and LITELLM_SETTINGS.enable_response_schema
 
     @property
     def chat_token_limit(self) -> int:
         """Suggest an input token limit, ensuring enough space in the context window for the maximum output tokens."""
+        if self._uses_openai_compatible_custom_endpoint():
+            return super().chat_token_limit
         try:
             model_info = get_model_info(LITELLM_SETTINGS.chat_model)
             if model_info is None:

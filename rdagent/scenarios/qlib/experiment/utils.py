@@ -58,7 +58,6 @@ def _generate_minute_sample_data(
 
     volume_curve, drift_curve = _build_intraday_profile(sampled_daily)
     minute_frames: list[pd.DataFrame] = []
-    quote_frames: list[pd.DataFrame] = []
 
     for (dt, instrument), row in sampled_daily.iterrows():
         base_open = float(row["$open"])
@@ -88,12 +87,6 @@ def _generate_minute_sample_data(
             minute_volume[-1] += base_volume - minute_volume.sum()
         vwap = (prev_close + high + low + close) / 4.0
 
-        spread = np.maximum(np.abs(close) * 0.0005, 1e-4)
-        bid1 = close - spread / 2.0
-        ask1 = close + spread / 2.0
-        bid1_size = np.maximum(np.round(minute_volume * (0.45 + 0.1 * np.sin(np.linspace(0, 2 * np.pi, len(close))))), 1.0)
-        ask1_size = np.maximum(np.round(minute_volume * (0.55 - 0.1 * np.sin(np.linspace(0, 2 * np.pi, len(close))))), 1.0)
-
         minute_frames.append(
             pd.DataFrame(
                 {
@@ -107,24 +100,11 @@ def _generate_minute_sample_data(
                 index=minute_index,
             )
         )
-        quote_frames.append(
-            pd.DataFrame(
-                {
-                    "$bid1": bid1,
-                    "$ask1": ask1,
-                    "$bid1_size": bid1_size,
-                    "$ask1_size": ask1_size,
-                    "$mid_price": (bid1 + ask1) / 2.0,
-                    "$spread_bps": ((ask1 - bid1) / np.maximum((bid1 + ask1) / 2.0, 1e-8)) * 10000.0,
-                },
-                index=minute_index,
-            )
-        )
 
     minute_pv_df = pd.concat(minute_frames).sort_index()
-    minute_quote_df = pd.concat(quote_frames).sort_index()
     minute_pv_df.to_hdf(minute_pv_path, key="data")
-    minute_quote_df.to_hdf(minute_quote_path, key="data")
+    if minute_quote_path.exists():
+        minute_quote_path.unlink()
 
 
 def ensure_sample_minute_data_files() -> None:
@@ -139,11 +119,7 @@ def ensure_sample_minute_data_files() -> None:
         if not daily_path.exists():
             continue
 
-        real_ready = (
-            real_minute_pv_path.exists()
-            and real_minute_quote_path.exists()
-            and _minute_day_count(real_minute_pv_path) >= max_days
-        )
+        real_ready = real_minute_pv_path.exists() and _minute_day_count(real_minute_pv_path) >= max_days
         if real_ready:
             continue
 
@@ -301,13 +277,11 @@ def resolve_factor_data_mode() -> str:
 def factor_mode_instruction(mode: str | None = None) -> str:
     selected_mode = resolve_factor_data_mode() if mode is None else mode
     data_folder = Path(FACTOR_COSTEER_SETTINGS.data_folder_debug)
-    has_real_minute_files = (data_folder / REAL_MINUTE_PV_FILENAME).exists() and (
-        data_folder / REAL_MINUTE_QUOTE_FILENAME
-    ).exists()
+    has_real_minute_files = (data_folder / REAL_MINUTE_PV_FILENAME).exists()
     minute_source_sentence = (
-        f"Prefer real minute-level source files such as {REAL_MINUTE_PV_FILENAME} and {REAL_MINUTE_QUOTE_FILENAME}."
+        f"Prefer real minute-level source files such as {REAL_MINUTE_PV_FILENAME}."
         if has_real_minute_files
-        else f"Use minute-level source files named {REAL_MINUTE_PV_FILENAME} and {REAL_MINUTE_QUOTE_FILENAME}."
+        else f"Use minute-level source files named {REAL_MINUTE_PV_FILENAME}."
     )
     instructions = {
         "daily": (
@@ -319,7 +293,7 @@ def factor_mode_instruction(mode: str | None = None) -> str:
             "Current factor mining mode: minute_factor.\n"
             + minute_source_sentence
             + "\n"
-            "You may aggregate intraday OHLCV and bid/ask information into one daily factor value per trading day and instrument.\n"
+            "You may aggregate intraday minute bar information into one daily factor value per trading day and instrument.\n"
             "Do not output minute-level factor values."
         ),
         "all": (
@@ -359,9 +333,9 @@ def get_data_folder_intro(fname_reg: str = ".*", flags=0, variable_mapping=None)
     ensure_sample_minute_data_files()
     mode = resolve_factor_data_mode()
     pattern_by_mode = {
-        "all": fname_reg,
+        "all": r"^(.+\.h5|README\.md)$" if fname_reg == ".*" else fname_reg,
         "daily": r"^(daily_.*\.h5|README\.md)$",
-        "minute": r"^(minute_.*\.h5|README\.md)$",
+        "minute": r"^(minute_pv\.h5|README\.md)$",
     }
     content_l = []
     for p in Path(FACTOR_COSTEER_SETTINGS.data_folder_debug).iterdir():
@@ -375,23 +349,46 @@ def get_data_folder_intro(fname_reg: str = ".*", flags=0, variable_mapping=None)
 
 def get_compact_data_folder_intro() -> str:
     mode = resolve_factor_data_mode()
+    data_folder = Path(FACTOR_COSTEER_SETTINGS.data_folder_debug)
+
+    def file_line(file_name: str, fallback_columns: list[str], description: str) -> str:
+        path = data_folder / file_name
+        columns = fallback_columns
+        if path.exists():
+            try:
+                columns = list(pd.read_hdf(path, key="data").columns)
+            except Exception:  # noqa: BLE001
+                columns = fallback_columns
+        return (
+            f"- {file_name}: {description} with MultiIndex ['datetime', 'instrument'] and columns "
+            f"{columns}."
+        )
+
+    daily_line = file_line(
+        "daily_pv.h5",
+        ["$open", "$close", "$high", "$low", "$volume", "$factor", "$turnover", "$turnover_rate"],
+        "daily stock/future data",
+    )
+    minute_pv_line = file_line(
+        "minute_pv.h5",
+        ["$open", "$close", "$high", "$low", "$volume", "$amount", "$open_interest"],
+        "Tushare minute bar data",
+    )
     compact_desc = {
         "daily": (
             "Available source files:\n"
-            "- daily_pv.h5: adjusted daily OHLCV and factor columns with MultiIndex ['datetime', 'instrument'].\n"
+            f"{daily_line}\n"
             "- README.md: brief schema reference."
         ),
         "minute": (
             "Available source files:\n"
-            "- minute_pv.h5: minute OHLCV, volume, VWAP with MultiIndex ['datetime', 'instrument'].\n"
-            "- minute_quote.h5: minute bid/ask, sizes, mid_price, spread_bps with MultiIndex ['datetime', 'instrument'].\n"
+            f"{minute_pv_line}\n"
             "- README.md: brief schema reference."
         ),
         "all": (
             "Available source files:\n"
-            "- daily_pv.h5: daily OHLCV.\n"
-            "- minute_pv.h5: minute OHLCV and VWAP.\n"
-            "- minute_quote.h5: minute bid/ask sample.\n"
+            f"{daily_line}\n"
+            f"{minute_pv_line}\n"
             "- README.md: brief schema reference."
         ),
     }

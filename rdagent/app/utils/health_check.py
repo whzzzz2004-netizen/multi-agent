@@ -158,10 +158,8 @@ def check_workspace_files() -> None:
     expected_files = [
         factor_data_dir / "daily_pv.h5",
         factor_data_dir / "minute_pv.h5",
-        factor_data_dir / "minute_quote.h5",
         factor_data_debug_dir / "daily_pv.h5",
         factor_data_debug_dir / "minute_pv.h5",
-        factor_data_debug_dir / "minute_quote.h5",
     ]
     missing_files = [str(path) for path in expected_files if not path.exists()]
     if missing_files:

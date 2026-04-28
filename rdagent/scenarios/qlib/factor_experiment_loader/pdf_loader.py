@@ -244,22 +244,37 @@ def __extract_core_factor_dict_from_one_report(
     response = __extract_core_factors_from_content(content)
     factor_dict = response.get("factors", {}) or {}
     final_factor_dict_to_one_report: dict[str, dict[str, str]] = {}
+
+    def _normalize_variables(raw_variables) -> dict[str, str]:
+        if isinstance(raw_variables, dict):
+            return {str(k): str(v) for k, v in raw_variables.items() if str(k).strip()}
+        if isinstance(raw_variables, list):
+            return {str(item): "" for item in raw_variables if str(item).strip()}
+        if isinstance(raw_variables, str) and raw_variables.strip():
+            return {raw_variables.strip(): ""}
+        return {}
+
     for factor_name, factor_data in factor_dict.items():
         if not isinstance(factor_data, dict):
             continue
+        normalized_factor_name = str(factor_name).strip()
         formulation = factor_data.get("formulation")
-        variables = factor_data.get("variables")
+        variables = _normalize_variables(factor_data.get("variables"))
         description = factor_data.get("description")
-        if not factor_name or not description or not formulation or not isinstance(variables, dict):
+        if not normalized_factor_name or not formulation:
             continue
-        normalized_formulation = formulation
-        if factor_name in normalized_formulation:
-            normalized_formulation = normalized_formulation.replace(factor_name, factor_name.replace("_", r"\_"))
+        normalized_description = str(description).strip() if description else f"Extracted from report: {normalized_factor_name}"
+        normalized_formulation = str(formulation)
+        if normalized_factor_name in normalized_formulation:
+            normalized_formulation = normalized_formulation.replace(
+                normalized_factor_name,
+                normalized_factor_name.replace("_", r"\_"),
+            )
         for variable in variables:
             if variable in normalized_formulation:
                 normalized_formulation = normalized_formulation.replace(variable, variable.replace("_", r"\_"))
-        final_factor_dict_to_one_report[factor_name] = {
-            "description": description,
+        final_factor_dict_to_one_report[normalized_factor_name] = {
+            "description": normalized_description,
             "formulation": normalized_formulation,
             "variables": variables,
         }
@@ -294,7 +309,17 @@ def extract_factors_from_report_dict(
         n=RD_AGENT_SETTINGS.multi_proc_n,
     )
     for index, file_name in enumerate(file_name_list):
-        final_report_factor_dict[file_name] = factor_dict_list[index]
+        extracted_factors = factor_dict_list[index]
+        # Single-pass extraction is faster/cheaper but can return an empty dict when
+        # model output slightly deviates from strict schema. Fall back to the legacy
+        # two-stage extraction for this report to keep throughput stable.
+        if single_pass and not extracted_factors:
+            logger.warning(
+                f"Single-pass extraction returned empty factors for {file_name}. "
+                "Falling back to two-stage extraction."
+            )
+            extracted_factors = __extract_factor_and_formulation_from_one_report(useful_report_dict[file_name])
+        final_report_factor_dict[file_name] = extracted_factors
     logger.info(f"Factor extraction completed for {len(final_report_factor_dict)} reports")
 
     return final_report_factor_dict
@@ -627,6 +652,12 @@ class FactorExperimentLoaderFromPDFfiles(FactorExperimentLoader):
         skip_factor_viability_check: bool = False,
         single_pass_extraction: bool = False,
     ) -> QlibFactorExperiment:
+        self.last_docs_dict = docs_dict
+        self.last_selected_report_dict = {}
+        self.last_file_to_factor_result = {}
+        self.last_factor_dict = {}
+        self.last_filtered_factor_dict = {}
+
         with logger.tag("docs"):
             logger.log_object(_summarize_docs_dict(docs_dict))
 
@@ -634,6 +665,7 @@ class FactorExperimentLoaderFromPDFfiles(FactorExperimentLoader):
             selected_report_dict = {path: {"class": 1} for path in docs_dict}
         else:
             selected_report_dict = classify_report_from_dict(report_dict=docs_dict, vote_time=1)
+        self.last_selected_report_dict = selected_report_dict
 
         with logger.tag("file_to_factor_result"):
             file_to_factor_result = extract_factors_from_report_dict(
@@ -642,10 +674,12 @@ class FactorExperimentLoaderFromPDFfiles(FactorExperimentLoader):
                 single_pass=single_pass_extraction,
             )
             logger.log_object(file_to_factor_result)
+            self.last_file_to_factor_result = file_to_factor_result
 
         with logger.tag("factor_dict"):
             factor_dict = merge_file_to_factor_dict_to_factor_dict(file_to_factor_result)
             logger.log_object(factor_dict)
+            self.last_factor_dict = factor_dict
 
         if skip_factor_viability_check:
             filtered_factor_dict = factor_dict
@@ -655,6 +689,7 @@ class FactorExperimentLoaderFromPDFfiles(FactorExperimentLoader):
             with logger.tag("filtered_factor_dict"):
                 factor_viability, filtered_factor_dict = check_factor_viability(factor_dict)
                 logger.log_object(filtered_factor_dict)
+        self.last_filtered_factor_dict = filtered_factor_dict
 
         return FactorExperimentLoaderFromDict().load(filtered_factor_dict)
 

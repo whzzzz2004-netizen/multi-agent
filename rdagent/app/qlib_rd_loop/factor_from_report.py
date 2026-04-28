@@ -1,15 +1,18 @@
 import asyncio
+from copy import deepcopy
+from datetime import datetime
 import json
+import os
 from pathlib import Path
 from typing import Any, Dict, Tuple
 
-import fire
 import pandas as pd
 
 from rdagent.app.qlib_rd_loop.conf import FACTOR_FROM_REPORT_PROP_SETTING
 from rdagent.app.qlib_rd_loop.factor import FactorRDLoop
 from rdagent.components.coder.factor_coder.config import FACTOR_COSTEER_SETTINGS
 from rdagent.components.coder.factor_coder.eva_utils import evaluate_factor_ic_from_workspace
+from rdagent.components.coder.factor_coder.factor import FactorTask
 from rdagent.components.document_reader.document_reader import (
     extract_first_page_screenshot_from_pdf,
     load_and_process_pdfs_by_langchain,
@@ -40,12 +43,103 @@ def _load_processed_report_paths() -> set[str]:
     if "source_type" in manifest.columns:
         source_type = manifest["source_type"].astype(str).str.lower()
         manifest = manifest[source_type == "literature_report"]
+    manifest = manifest[manifest["accepted"].astype(str).str.lower().isin(["true", "1"])] if "accepted" in manifest.columns else manifest
+    path_counts = manifest["source_report_path"].dropna().astype(str).map(lambda p: str(Path(p).resolve()))
     processed_paths = {
-        str(Path(path).resolve())
-        for path in manifest["source_report_path"].dropna().astype(str).tolist()
-        if path.strip()
+        path
+        for path, count in path_counts.value_counts().items()
+        if count >= FACTOR_FROM_REPORT_PROP_SETTING.max_factors_per_exp
     }
     return processed_paths
+
+
+def _load_terminal_report_factor_names(report_path: str | Path) -> set[str]:
+    manifest_path = Path.cwd() / "git_ignore_folder" / "factor_outputs" / "manifest.csv"
+    if not manifest_path.exists():
+        return set()
+    try:
+        manifest = pd.read_csv(manifest_path)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Failed to read factor manifest for exported factor detection: {exc}")
+        return set()
+    required_columns = {"factor_name", "source_report_path"}
+    if not required_columns.issubset(manifest.columns):
+        return set()
+    if "source_type" in manifest.columns:
+        source_type = manifest["source_type"].astype(str).str.lower()
+        manifest = manifest[source_type == "literature_report"]
+    resolved_report_path = str(Path(report_path).resolve())
+    source_paths = manifest["source_report_path"].fillna("").astype(str).map(lambda p: str(Path(p).resolve()) if p else "")
+    report_manifest = manifest[source_paths == resolved_report_path]
+    return {
+        str(name).strip()
+        for name in report_manifest["factor_name"].dropna().astype(str).tolist()
+        if str(name).strip()
+    }
+
+
+def _record_rejected_report_factor(task, feedback, source_report_path: str | None, source_report_title: str | None) -> None:
+    if source_report_path is None:
+        return
+    output_dir = Path.cwd() / "git_ignore_folder" / "factor_outputs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    manifest_path = output_dir / "manifest.csv"
+    factor_name = str(getattr(task, "factor_name", "") or "").strip()
+    if not factor_name:
+        return
+
+    review_notes = "\n".join(
+        part
+        for part in [
+            getattr(feedback, "execution", None),
+            getattr(feedback, "return_checking", None),
+            getattr(feedback, "code", None),
+            getattr(feedback, "final_feedback", None),
+        ]
+        if part
+    )
+    row = pd.DataFrame(
+        [
+            {
+                "factor_name": factor_name,
+                "display_name": factor_name,
+                "hash": None,
+                "rows": 0,
+                "non_null": 0,
+                "time_granularity": "daily",
+                "accepted": False,
+                "ic_score": None,
+                "factor_description": getattr(task, "factor_description", None),
+                "factor_formulation": getattr(task, "factor_formulation", None),
+                "variables": json.dumps(getattr(task, "variables", None), ensure_ascii=False),
+                "logic_summary": getattr(task, "factor_description", None),
+                "tags": json.dumps(["literature_factor", "report_extracted", "rejected"], ensure_ascii=False),
+                "source_type": "literature_report",
+                "source_report_title": source_report_title,
+                "source_report_path": source_report_path,
+                "review_notes": review_notes or "Rejected during paper-factor reproduction.",
+                "latest_path": None,
+                "metadata_path": None,
+                "code_path": None,
+                "workspace_path": None,
+                "updated_at": datetime.now().isoformat(timespec="seconds"),
+            }
+        ]
+    )
+    if manifest_path.exists():
+        manifest = pd.read_csv(manifest_path)
+        same_factor = manifest["factor_name"].astype(str) == factor_name if "factor_name" in manifest.columns else False
+        same_report = (
+            manifest["source_report_path"].fillna("").astype(str).map(lambda p: str(Path(p).resolve()) if p else "")
+            == str(Path(source_report_path).resolve())
+            if "source_report_path" in manifest.columns
+            else False
+        )
+        manifest = manifest[~(same_factor & same_report)]
+        manifest = pd.concat([manifest, row], ignore_index=True)
+    else:
+        manifest = row
+    manifest.sort_values("factor_name").to_csv(manifest_path, index=False)
 
 
 def list_unprocessed_report_paths(report_folder: str | Path) -> list[Path]:
@@ -111,6 +205,70 @@ def build_lightweight_hypothesis(report_file_path: str, factor_result: dict) -> 
     )
 
 
+def _persist_extracted_factor_preview(
+    report_file_path: str,
+    *,
+    minimal_mode: bool,
+    factor_result: dict[str, dict[str, Any]],
+    file_to_factor_result: dict[str, dict[str, dict[str, Any]]] | None = None,
+) -> Path:
+    report_path = Path(report_file_path).resolve()
+    output_dir = Path.cwd() / "git_ignore_folder" / "factor_outputs" / "extracted_reports"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    payload = {
+        "report_file_path": str(report_path),
+        "report_title": report_path.stem,
+        "minimal_mode": minimal_mode,
+        "factor_count": len(factor_result),
+        "factor_names": list(factor_result.keys()),
+        "factors": factor_result,
+        "raw_file_to_factor_result": file_to_factor_result or {},
+    }
+    output_path = output_dir / f"{report_path.stem}.extracted.json"
+    output_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    return output_path
+
+
+def _extracted_factor_preview_path(report_file_path: str | Path) -> Path:
+    report_path = Path(report_file_path).resolve()
+    return Path.cwd() / "git_ignore_folder" / "factor_outputs" / "extracted_reports" / f"{report_path.stem}.extracted.json"
+
+
+def _load_exp_from_extracted_factor_preview(report_file_path: str, *, minimal_mode: bool) -> QlibFactorExperiment | None:
+    preview_path = _extracted_factor_preview_path(report_file_path)
+    if not preview_path.exists():
+        return None
+    try:
+        payload = json.loads(preview_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Failed to read extracted factor cache {preview_path}: {exc}")
+        return None
+    if str(payload.get("report_file_path") or "") != str(Path(report_file_path).resolve()):
+        return None
+    factors = payload.get("factors") or {}
+    if not isinstance(factors, dict) or not factors:
+        return None
+    tasks = [
+        FactorTask(
+            factor_name=name,
+            factor_description=str(item.get("description") or ""),
+            factor_formulation=str(item.get("formulation") or ""),
+            variables=item.get("variables") if isinstance(item.get("variables"), dict) else {},
+        )
+        for name, item in factors.items()
+        if isinstance(item, dict)
+    ]
+    if not tasks:
+        return None
+    report_path = Path(report_file_path).resolve()
+    exp = QlibFactorExperiment(sub_tasks=tasks, hypothesis=build_lightweight_hypothesis(report_path.stem, factors))
+    exp.source_report_path = str(report_path)
+    exp.source_report_title = report_path.stem
+    logger.info(f"Loaded extracted factor cache from {preview_path}. factor_count={len(tasks)}")
+    print(f"paper_factor: loaded extracted factor cache ({len(tasks)} factor(s)).", flush=True)
+    return exp
+
+
 def extract_hypothesis_and_exp_from_reports(
     report_file_path: str,
     *,
@@ -126,14 +284,37 @@ def extract_hypothesis_and_exp_from_reports(
         QlibFactorExperiment: An instance of QlibFactorExperiment containing the extracted details.
         None: If no valid experiment is found in the report.
     """
+    if os.environ.get("RDAGENT_PAPER_FACTOR_FAST", "").strip().lower() in {"1", "true", "yes", "on"}:
+        cached_exp = _load_exp_from_extracted_factor_preview(report_file_path, minimal_mode=minimal_mode)
+        if cached_exp is not None:
+            return cached_exp
+
     docs_dict = load_and_process_pdfs_by_langchain(report_file_path)
-    exp = FactorExperimentLoaderFromPDFfiles().load_from_docs_dict(
+    loader = FactorExperimentLoaderFromPDFfiles()
+    exp = loader.load_from_docs_dict(
         docs_dict,
         skip_report_classification=minimal_mode,
         skip_factor_viability_check=minimal_mode,
         single_pass_extraction=minimal_mode,
     )
+    raw_factor_result = getattr(loader, "last_factor_dict", {}) or {}
+    raw_file_to_factor_result = getattr(loader, "last_file_to_factor_result", {}) or {}
+    preview_path = _persist_extracted_factor_preview(
+        report_file_path,
+        minimal_mode=minimal_mode,
+        factor_result=raw_factor_result,
+        file_to_factor_result=raw_file_to_factor_result,
+    )
+    logger.info(
+        f"Saved extracted factor preview to {preview_path}. "
+        f"Extracted factor_count={len(raw_factor_result)} for report={Path(report_file_path).name}"
+    )
+
     if exp is None or exp.sub_tasks == []:
+        logger.warning(
+            f"No executable factors were produced from report {report_file_path}. "
+            f"Check extracted preview JSON: {preview_path}"
+        )
         return None
 
     pdf_screenshot = extract_first_page_screenshot_from_pdf(report_file_path)
@@ -164,10 +345,22 @@ def extract_hypothesis_and_exp_from_reports(
 class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
     def __init__(self, report_folder: str = None, minimal_mode: bool = True, report_paths: list[str] | None = None):
         super().__init__(PROP_SETTING=FACTOR_FROM_REPORT_PROP_SETTING)
+        os.environ.setdefault("RDAGENT_PAPER_FACTOR_SKIP_LOW_IC_REPAIR", "1")
+        os.environ.setdefault("RDAGENT_PAPER_FACTOR_FAST", "1")
+        os.environ.setdefault("RDAGENT_FACTOR_MAX_CONSECUTIVE_OUTPUT_WITHOUT_ACCEPT", "0")
         self.minimal_mode = minimal_mode
+        self.report_cursor = 0
+        self.pending_report_exp: QlibFactorExperiment | None = None
+        self.pending_report_factor_idx = 0
+        self.pending_report_factor_total = 0
+        self.pending_report_extracted_count = 0
         if hasattr(self, "coder") and getattr(self.coder, "settings", None) is not None:
             self.coder.settings.v2_query_component_limit = 0
             self.coder.settings.v2_knowledge_sampler = 0.0
+            self.coder.with_knowledge = True
+            self.coder.knowledge_self_gen = False
+            self.coder.max_loop = 3
+            self.coder.stop_eval_chain_on_fail = True
         processed_report_paths = _load_processed_report_paths()
         if report_paths is not None:
             raw_items = report_paths
@@ -189,31 +382,18 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
         if skipped_count > 0:
             logger.info(f"Skipped {skipped_count} already-processed report(s) based on factor manifest.")
 
-        self.loop_n = min(len(self.judge_pdf_data_items), FACTOR_FROM_REPORT_PROP_SETTING.report_limit)
+        self.loop_n = None
         self.shift_report = (
             0  # some reports does not contain viable factor, so we ship some of them to avoid infinite loop
         )
 
     async def direct_exp_gen(self, prev_out: dict[str, Any]):
         while True:
-            if self.get_unfinished_loop_cnt(self.loop_idx) < RD_AGENT_SETTINGS.get_max_parallel():
-                report_file_path = self.judge_pdf_data_items[self.loop_idx + self.shift_report]
-                logger.info(f"Processing number {self.loop_idx} report: {report_file_path}")
-                exp = extract_hypothesis_and_exp_from_reports(
-                    str(report_file_path),
-                    minimal_mode=self.minimal_mode,
-                )
-                if exp is None:
-                    self.shift_report += 1
-                    self.loop_n -= 1
-                    if self.loop_n < 0:  # NOTE: on every step, we self.loop_n -= 1 at first.
-                        raise self.LoopTerminationError("Reach stop criterion and stop loop")
-                    continue
+            if self.get_unfinished_loop_cnt(self.loop_idx) == 0:
+                exp = self._next_single_factor_exp()
                 exp.based_experiments = [QlibFactorExperiment(sub_tasks=[], hypothesis=exp.hypothesis)] + [
                     t[0] for t in self.trace.hist if t[1]
                 ]
-                exp.sub_workspace_list = exp.sub_workspace_list[: FACTOR_FROM_REPORT_PROP_SETTING.max_factors_per_exp]
-                exp.sub_tasks = exp.sub_tasks[: FACTOR_FROM_REPORT_PROP_SETTING.max_factors_per_exp]
                 exp.base_features = self.plan["features"]
                 if exp.based_experiments:
                     exp.based_experiments[-1].base_features = self.plan["features"]
@@ -221,6 +401,74 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
                 logger.log_object(exp.sub_tasks, tag="experiment generation")
                 return exp
             await asyncio.sleep(1)
+
+    def _next_single_factor_exp(self) -> QlibFactorExperiment:
+        while self.pending_report_exp is None or self.pending_report_factor_idx >= self.pending_report_factor_total:
+            if self.report_cursor >= len(self.judge_pdf_data_items) or self.report_cursor >= FACTOR_FROM_REPORT_PROP_SETTING.report_limit:
+                raise self.LoopTerminationError("Reach stop criterion and stop loop")
+
+            report_file_path = self.judge_pdf_data_items[self.report_cursor]
+            self.report_cursor += 1
+            logger.info(f"Processing report {self.report_cursor}: {report_file_path}")
+            exp = extract_hypothesis_and_exp_from_reports(
+                str(report_file_path),
+                minimal_mode=self.minimal_mode,
+            )
+            if exp is None or not exp.sub_tasks:
+                continue
+            terminal_factor_names = _load_terminal_report_factor_names(report_file_path)
+            if terminal_factor_names:
+                before_count = len(exp.sub_tasks)
+                exp.sub_tasks = [
+                    task for task in exp.sub_tasks if getattr(task, "factor_name", None) not in terminal_factor_names
+                ]
+                skipped_factor_count = before_count - len(exp.sub_tasks)
+                if skipped_factor_count > 0:
+                    logger.info(
+                        f"Skipped {skipped_factor_count} already-terminal factor(s) for report "
+                        f"{report_file_path.name}: {sorted(terminal_factor_names)}"
+                    )
+            if not exp.sub_tasks:
+                continue
+            self.pending_report_exp = exp
+            self.pending_report_factor_idx = 0
+            self.pending_report_extracted_count = len(exp.sub_tasks)
+            self.pending_report_factor_total = min(
+                len(exp.sub_tasks),
+                FACTOR_FROM_REPORT_PROP_SETTING.max_factors_per_exp,
+            )
+            logger.info(
+                "Report factor serial coding plan: "
+                f"extracted={self.pending_report_extracted_count}, "
+                f"scheduled={self.pending_report_factor_total}, "
+                f"max_per_exp={FACTOR_FROM_REPORT_PROP_SETTING.max_factors_per_exp}"
+            )
+            print(
+                "paper_factor: extracted "
+                f"{self.pending_report_extracted_count} factor(s), scheduled {self.pending_report_factor_total}.",
+                flush=True,
+            )
+
+        source_exp = self.pending_report_exp
+        factor_idx = self.pending_report_factor_idx
+        self.pending_report_factor_idx += 1
+
+        single_exp = deepcopy(source_exp)
+        single_exp.sub_tasks = [source_exp.sub_tasks[factor_idx]]
+        if source_exp.sub_workspace_list:
+            single_exp.sub_workspace_list = [source_exp.sub_workspace_list[factor_idx]]
+        else:
+            single_exp.sub_workspace_list = []
+        logger.info(
+            "Scheduling report factor "
+            f"{factor_idx + 1}/{self.pending_report_factor_total}: {single_exp.sub_tasks[0].factor_name}"
+        )
+        print(
+            "paper_factor: coding "
+            f"{factor_idx + 1}/{self.pending_report_factor_total} {single_exp.sub_tasks[0].factor_name}",
+            flush=True,
+        )
+        return single_exp
 
     def coding(self, prev_out: dict[str, Any]):
         exp = self.coder.develop(prev_out["direct_exp_gen"])
@@ -235,7 +483,17 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
             source_report_path = getattr(exp, "source_report_path", None)
             source_report_title = getattr(exp, "source_report_title", None)
             for task, workspace, task_feedback in zip(exp.sub_tasks, exp.sub_workspace_list, exp.prop_dev_feedback):
-                if workspace is None or task_feedback is None or not bool(task_feedback.final_decision):
+                if task_feedback is None:
+                    continue
+                if getattr(task_feedback, "source_feedback", {}).get("paper_factor_low_ic_terminal") is False:
+                    _record_rejected_report_factor(task, task_feedback, source_report_path, source_report_title)
+                    print(f"paper_factor: rejected {task.factor_name} (low IC).", flush=True)
+                    continue
+                if not bool(task_feedback.final_decision):
+                    _record_rejected_report_factor(task, task_feedback, source_report_path, source_report_title)
+                    print(f"paper_factor: rejected {task.factor_name} (implementation check failed).", flush=True)
+                    continue
+                if workspace is None:
                     continue
                 try:
                     _, df = workspace.execute("All")
@@ -257,6 +515,12 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
                         f"Skip reviewed export for report-derived factor {task.factor_name} because full-sample IC "
                         f"did not pass. {ic_feedback}"
                     )
+                    task_feedback.final_feedback = (
+                        "Paper-factor reproduction code passed implementation checks, but full-sample IC did not pass; "
+                        "recorded as rejected without further repair."
+                    )
+                    _record_rejected_report_factor(task, task_feedback, source_report_path, source_report_title)
+                    print(f"paper_factor: rejected {task.factor_name} (full-sample low IC).", flush=True)
                     continue
                 logic_summary = task.factor_description
                 review_notes = "\n".join(
@@ -277,6 +541,7 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
                     source_report_title=source_report_title,
                 )
                 exported_count += 1
+                print(f"paper_factor: exported {task.factor_name}.", flush=True)
 
         self.trace.sync_dag_parent_and_hist((exp, feedback), prev_out[self.LOOP_IDX_KEY])
         logger.info(
@@ -305,8 +570,6 @@ def _infer_report_factor_registry_tags(task, feedback) -> list[str]:
         "vwap": "vwap",
         "spread": "liquidity",
         "liquidity": "liquidity",
-        "bid": "quote",
-        "ask": "quote",
         "minute": "minute_input",
         "intraday": "minute_input",
         "microstructure": "microstructure",
@@ -347,4 +610,6 @@ def main(report_folder=None, path=None, all_duration=None, checkout=True, minima
 
 
 if __name__ == "__main__":
+    import fire
+
     fire.Fire(main)

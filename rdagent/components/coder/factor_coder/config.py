@@ -28,7 +28,7 @@ class FactorCoSTEERSettings(CoSTEERSettings):
     python_bin: str = "python"
     """Path to the Python binary"""
 
-    min_abs_ic: float = 0.01
+    min_abs_ic: float = 0.005
     """Minimum absolute cross-sectional IC required for a factor to be accepted into the pool"""
 
 

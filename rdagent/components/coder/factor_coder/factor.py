@@ -20,6 +20,7 @@ from rdagent.core.exception import CodeFormatError, CustomRuntimeError, NoOutput
 from rdagent.core.experiment import Experiment, FBWorkspace
 from rdagent.core.utils import cache_with_pickle
 from rdagent.oai.llm_utils import md5_hash
+from rdagent.scenarios.qlib.developer.factor_dashboard import refresh_factor_dashboard
 
 
 class FactorTask(CoSTEERTask):
@@ -164,9 +165,6 @@ class FactorFBWorkspace(FBWorkspace):
             "liquidity": "liquidity",
             "spread": "liquidity",
             "vwap": "vwap",
-            "quote": "quote",
-            "bid": "quote",
-            "ask": "quote",
             "minute": "minute_input",
             "intraday": "minute_input",
             "microstructure": "microstructure",
@@ -179,8 +177,6 @@ class FactorFBWorkspace(FBWorkspace):
         for keyword, tag in keyword_to_tag.items():
             if keyword in content:
                 tags.add(tag)
-        if "minute_quote.h5" in content:
-            tags.update({"minute_input", "quote"})
         if "minute_pv.h5" in content:
             tags.add("minute_input")
         if "daily_pv.h5" in content:
@@ -205,9 +201,11 @@ class FactorFBWorkspace(FBWorkspace):
         review_metadata: dict[str, Any] | None = None,
     ) -> None:
         metadata_path = latest_path.with_suffix(".meta.json")
+        code_path = latest_path.with_suffix(".code.py")
         task = self.target_task if isinstance(self.target_task, FactorTask) else None
         metadata = {
             "factor_name": factor_name,
+            "display_name": str(df.columns[0]),
             "factor_description": task.factor_description if task is not None else None,
             "factor_formulation": task.factor_formulation if task is not None else None,
             "variables": task.variables if task is not None else None,
@@ -221,10 +219,25 @@ class FactorFBWorkspace(FBWorkspace):
             "tags": self._infer_factor_tags(task, extra_tags=(review_metadata or {}).get("tags")),
             "updated_at": datetime.now().isoformat(timespec="seconds"),
             "workspace_path": str(self.workspace_path),
+            "latest_path": str(latest_path),
+            "metadata_path": str(metadata_path),
+            "code_path": str(code_path),
         }
         if review_metadata:
             metadata.update(review_metadata)
         metadata_path.write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def _write_factor_code_snapshot(self, latest_path: Path) -> Path | None:
+        code_path = latest_path.with_suffix(".code.py")
+        code = self.file_dict.get("factor.py")
+        if code is None:
+            workspace_code_path = self.workspace_path / "factor.py"
+            if workspace_code_path.exists():
+                code = workspace_code_path.read_text(encoding="utf-8", errors="replace")
+        if code is None:
+            return None
+        code_path.write_text(code, encoding="utf-8")
+        return code_path
 
     def _update_factor_manifest(
         self,
@@ -235,25 +248,32 @@ class FactorFBWorkspace(FBWorkspace):
         review_metadata: dict[str, Any] | None = None,
     ) -> None:
         manifest_path = self.EXPORTED_PARQUET_DIR / "manifest.csv"
+        metadata_path = latest_path.with_suffix(".meta.json")
+        code_path = latest_path.with_suffix(".code.py")
+        task = self.target_task if isinstance(self.target_task, FactorTask) else None
         tags = self._infer_factor_tags(
-            self.target_task if isinstance(self.target_task, FactorTask) else None,
+            task,
             extra_tags=(review_metadata or {}).get("tags"),
         )
         row = pd.DataFrame(
             [
                 {
                     "factor_name": factor_name,
+                    "display_name": str(df.columns[0]),
                     "hash": factor_hash,
                     "rows": len(df),
                     "non_null": int(df.iloc[:, 0].notna().sum()),
                     "time_granularity": self._infer_time_granularity(df),
                     "accepted": bool((review_metadata or {}).get("accepted", False)),
                     "ic_score": (review_metadata or {}).get("ic_score"),
+                    "factor_description": task.factor_description if task is not None else None,
+                    "factor_formulation": task.factor_formulation if task is not None else None,
+                    "variables": json.dumps(task.variables, ensure_ascii=False)
+                    if task is not None and task.variables is not None
+                    else None,
                     "logic_summary": (review_metadata or {}).get("logic_summary")
                     or (
-                        self.target_task.factor_description
-                        if isinstance(self.target_task, FactorTask)
-                        else ""
+                        task.factor_description if task is not None else ""
                     ),
                     "tags": json.dumps(tags, ensure_ascii=False),
                     "source_type": (review_metadata or {}).get("source_type", "agent_generated"),
@@ -261,6 +281,8 @@ class FactorFBWorkspace(FBWorkspace):
                     "source_report_path": (review_metadata or {}).get("source_report_path"),
                     "review_notes": (review_metadata or {}).get("review_notes"),
                     "latest_path": str(latest_path),
+                    "metadata_path": str(metadata_path),
+                    "code_path": str(code_path) if code_path.exists() else None,
                     "workspace_path": str(self.workspace_path),
                     "updated_at": datetime.now().isoformat(timespec="seconds"),
                 }
@@ -320,16 +342,20 @@ class FactorFBWorkspace(FBWorkspace):
             try:
                 existing_df = pd.read_parquet(latest_path)
                 if self._hash_factor_dataframe(existing_df) == current_hash:
+                    self._write_factor_code_snapshot(latest_path)
                     self._write_factor_metadata(factor_name, latest_path, df, current_hash, review_metadata)
                     self._update_factor_manifest(factor_name, latest_path, df, current_hash, review_metadata)
+                    refresh_factor_dashboard()
                     return
             except Exception:
                 # If the previous parquet cannot be read, overwrite it with the current successful output.
                 pass
 
         df.to_parquet(latest_path, engine="pyarrow")
+        self._write_factor_code_snapshot(latest_path)
         self._write_factor_metadata(factor_name, latest_path, df, current_hash, review_metadata)
         self._update_factor_manifest(factor_name, latest_path, df, current_hash, review_metadata)
+        refresh_factor_dashboard()
 
         if self._env_flag("FACTOR_EXPORT_KEEP_SNAPSHOTS"):
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")

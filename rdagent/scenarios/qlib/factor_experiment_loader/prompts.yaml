@@ -1,9 +1,9 @@
 extract_factors_system: |-
     用户会提供一篇金融工程研报。在当前任务里，这篇文章的作用就是提供可复现的因子。
-    请把注意力集中在文章新提出的因子上，不要把模型、训练框架、实验设置、回测流程当作抽取重点。
+    请把注意力集中在文章重点提出、重点讨论、最能代表本文贡献的因子上，不要把模型、训练框架、实验设置、回测流程当作抽取重点。
     请按照要求抽取以下信息:
     1. 概述这篇研报的主要研究思路;
-    2. 只抽取这篇研报新提出的因子，并概述因子的计算过程。不要抽取只用于对比或回顾的已有因子。因子的名称请使用英文，不能包含空格，可用下划线连接。一般新因子数量不会太多；若没有，请返回空字典;
+    2. 只抽取这篇研报新提出或重点研究的代表性因子，并概述因子的计算过程。不要抽取只用于对比、回顾、控制变量或基线测试的已有因子。最多返回 10 个因子；如果候选因子超过 10 个，请按论文强调程度、公式清晰度和可复现性选择最重要的 10 个。因子的名称请使用英文，不能包含空格，可用下划线连接。若没有，请返回空字典;
 
     user will treat your factor name as key to store the factor, don't put any interaction message in the content. Just response the output without any interaction and explanation.
     All names should be in English.
@@ -18,8 +18,8 @@ extract_factors_system: |-
 
 extract_core_factors_system: |-
     用户会提供一篇金融工程研报。在当前任务里，这篇文章的作用就是提供可复现的因子。
-    请只总结这篇论文新提出的核心因子。不要抽取只用于对比、回顾或基线测试的已有因子。
-    一般核心新因子数量不会太多。请一次性直接给出因子描述、公式和变量说明，避免遗漏和重复。
+    请只总结这篇论文重点提出、重点讨论、最能代表本文贡献的核心因子。不要抽取只用于对比、回顾、控制变量或基线测试的已有因子。
+    最多返回 10 个因子；如果候选因子超过 10 个，请按论文强调程度、公式清晰度和可复现性选择最重要的 10 个。请一次性直接给出因子描述、公式和变量说明，避免遗漏和重复。
 
     只使用 JSON 返回，不要输出任何解释文字。所有因子名称使用英文，下划线连接，不能包含空格。
     如果论文没有明确提出可复现的新因子，就返回空字典。
@@ -129,8 +129,7 @@ factor_viability_system: |-
 
     User ONLY has the following source data:
     1. Daily OHLCV data: daily open, close, high, low, volume, and adjustment factor;
-    2. Minute OHLCV/VWAP data: minute open, close, high, low, volume, and vwap;
-    3. Minute quote sample data: bid1, ask1, bid1_size, ask1_size, mid_price, and spread_bps.
+    2. Minute bar data: minute open, close, high, low, volume, amount, and any other columns explicitly listed in the data schema.
 
     User does NOT have the following data unless the factor description explicitly shows it can be derived from the three data sources above:
     1. Company financial statements such as balance sheet, income statement, and cash flow statement;
@@ -146,8 +145,8 @@ factor_viability_system: |-
     3. The factor should be able to be calculated based on the source data provided by user.
 
     Important filtering rule:
-    - If a factor clearly requires unavailable data such as financial statements, market cap, valuation ratios, industry labels, analyst expectations, or any other non-price-volume / non-minute-quote data, mark it as non-viable directly.
-    - If the formula mentions variables that cannot be derived from daily OHLCV, minute OHLCV/VWAP, or minute quote sample data, mark it as non-viable directly.
+    - If a factor clearly requires unavailable data such as financial statements, market cap, valuation ratios, industry labels, analyst expectations, order-book quotes, or any other data outside the listed daily and minute bar files, mark it as non-viable directly.
+    - If the formula mentions variables that cannot be derived from daily OHLCV/turnover fields or minute OHLCV/VWAP bar data, mark it as non-viable directly.
     - Be conservative. If the required raw data is missing, reject the factor instead of guessing.
 
     You should give decision to each factor provided by the user. You should reject the factor based on very solid reason.

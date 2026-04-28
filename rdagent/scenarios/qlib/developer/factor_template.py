@@ -21,7 +21,6 @@ def calculate_volume_imbalance():
     # 可以按任务选择不同粒度的数据文件，例如：
     # - daily_pv.h5
     # - minute_pv.h5
-    # - minute_quote.h5
     df = pd.read_hdf(DATA_DIR / "daily_pv.h5", key="data")
     
     # 2. 确保成交量是数值类型（注意列名可能是 'volume' 或 '$volume'）

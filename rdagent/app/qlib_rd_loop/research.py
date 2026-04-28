@@ -8,6 +8,7 @@ provide narrower workflows for day-to-day research operations.
 import asyncio
 import json
 import math
+import os
 import re
 from datetime import datetime
 from pathlib import Path
@@ -81,6 +82,9 @@ class FactorMiningLoop(FactorRDLoop):
 
     @staticmethod
     def _task_priority_score(task) -> float:
+        if os.environ.get("RDAGENT_FACTOR_DATA_MODE", "").strip().lower() == "minute":
+            return 0.0
+
         name = getattr(task, "factor_name", "") or ""
         description = getattr(task, "factor_description", "") or ""
         formulation = getattr(task, "factor_formulation", "") or ""

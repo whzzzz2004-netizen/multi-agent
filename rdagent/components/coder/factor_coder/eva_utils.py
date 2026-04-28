@@ -1,5 +1,6 @@
 import io
 import json
+import os
 import re
 from pathlib import Path
 from abc import abstractmethod
@@ -169,6 +170,10 @@ class FactorSingleColumnEvaluator(FactorEvaluator):
 
 
 class FactorOutputFormatEvaluator(FactorEvaluator):
+    @staticmethod
+    def _paper_fast_enabled() -> bool:
+        return os.environ.get("RDAGENT_PAPER_FACTOR_FAST", "").strip().lower() in {"1", "true", "yes", "on"}
+
     def evaluate(
         self,
         implementation: Workspace,
@@ -180,6 +185,19 @@ class FactorOutputFormatEvaluator(FactorEvaluator):
                 "The source dataframe is None. Skip the evaluation of the output format.",
                 False,
             )
+        if self._paper_fast_enabled():
+            if not isinstance(gen_df.index, pd.MultiIndex):
+                return "Output format check failed: result index is not a MultiIndex.", False
+            index_names = list(gen_df.index.names)
+            if index_names != ["datetime", "instrument"]:
+                return (
+                    "Output format check failed: result index must be named ['datetime', 'instrument'], "
+                    f"but got {index_names}.",
+                    False,
+                )
+            if gen_df.shape[1] != 1:
+                return f"Output format check failed: result must have exactly one factor column, got {gen_df.shape[1]}.", False
+            return "Output format check passed by deterministic paper-factor fast check.", True
         buffer = io.StringIO()
         gen_df.info(buf=buffer)
         gen_df_info_str = f"The user is currently working on a feature related task.\nThe output dataframe info is:\n{buffer.getvalue()}"
@@ -361,6 +379,12 @@ def evaluate_factor_ic_from_workspace(
     threshold = FACTOR_COSTEER_SETTINGS.min_abs_ic
     if abs(ic) >= threshold:
         return f"The factor has mean daily IC={ic:.6f}, which passes the minimum absolute IC threshold {threshold:.4f}.", ic
+    if os.environ.get("RDAGENT_PAPER_FACTOR_SKIP_LOW_IC_REPAIR", "").strip().lower() in {"1", "true", "yes", "on"}:
+        return (
+            f"The factor has mean daily IC={ic:.6f}, which is below the minimum absolute IC threshold {threshold:.4f}. "
+            "For paper-factor reproduction, treat this as a terminal rejected reproduction instead of revising the formula.",
+            ic,
+        )
     return (
         f"The factor has mean daily IC={ic:.6f}, which is below the minimum absolute IC threshold {threshold:.4f}. "
         "Revise the factor logic or aggregation method.",
@@ -565,7 +589,7 @@ class FactorValueEvaluator(FactorEvaluator):
             feedback_str, ic_check_result = FactorICEvaluator(self.scen).evaluate(
                 implementation,
                 gt_implementation,
-                data_type="Debug",
+                data_type="All",
             )
             conclusions.append(feedback_str)
         else:

@@ -68,10 +68,22 @@ def _build_compact_daily_dataset(
     compact_df = df.loc[pd.IndexSlice[chosen_dates, chosen_instruments], :].sort_index()
     if compact_df.empty:
         return False
+    compact_df = _ensure_daily_turnover_columns(compact_df)
 
     target_path.parent.mkdir(parents=True, exist_ok=True)
     compact_df.to_hdf(target_path, key="data")
     return True
+
+
+def _ensure_daily_turnover_columns(df: pd.DataFrame) -> pd.DataFrame:
+    result = df.copy()
+    if "$turnover_rate" not in result.columns:
+        volume = pd.to_numeric(result.get("$volume"), errors="coerce").fillna(0.0)
+        scale = volume.groupby(level="datetime").transform("median").replace(0, np.nan)
+        result["$turnover_rate"] = (volume / scale).replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(np.float32)
+    if "$turnover" not in result.columns:
+        result["$turnover"] = result["$turnover_rate"]
+    return result
 
 
 def _generate_synthetic_daily_factor_file(
@@ -113,6 +125,7 @@ def _generate_synthetic_daily_factor_file(
         )
 
     synthetic_df = pd.concat(rows).sort_index()
+    synthetic_df = _ensure_daily_turnover_columns(synthetic_df)
     target_path.parent.mkdir(parents=True, exist_ok=True)
     synthetic_df.to_hdf(target_path, key="data")
 
@@ -161,7 +174,6 @@ def _generate_minute_sample_data(
 
     volume_curve, drift_curve = _build_intraday_profile()
     minute_frames: list[pd.DataFrame] = []
-    quote_frames: list[pd.DataFrame] = []
 
     for (dt, instrument), row in sampled_daily.iterrows():
         base_open = float(row["$open"])
@@ -188,13 +200,6 @@ def _generate_minute_sample_data(
             minute_volume[-1] += base_volume - minute_volume.sum()
         vwap = (prev_close + high + low + close) / 4.0
 
-        spread = np.maximum(np.abs(close) * 0.0005, 1e-4)
-        bid1 = close - spread / 2.0
-        ask1 = close + spread / 2.0
-        sinusoid = np.sin(np.linspace(0, 2 * np.pi, len(close)))
-        bid1_size = np.maximum(np.round(minute_volume * (0.45 + 0.1 * sinusoid)), 1.0)
-        ask1_size = np.maximum(np.round(minute_volume * (0.55 - 0.1 * sinusoid)), 1.0)
-
         minute_frames.append(
             pd.DataFrame(
                 {
@@ -208,22 +213,10 @@ def _generate_minute_sample_data(
                 index=minute_index,
             )
         )
-        quote_frames.append(
-            pd.DataFrame(
-                {
-                    "$bid1": bid1,
-                    "$ask1": ask1,
-                    "$bid1_size": bid1_size,
-                    "$ask1_size": ask1_size,
-                    "$mid_price": (bid1 + ask1) / 2.0,
-                    "$spread_bps": ((ask1 - bid1) / np.maximum((bid1 + ask1) / 2.0, 1e-8)) * 10000.0,
-                },
-                index=minute_index,
-            )
-        )
 
     pd.concat(minute_frames).sort_index().to_hdf(minute_pv_path, key="data")
-    pd.concat(quote_frames).sort_index().to_hdf(minute_quote_path, key="data")
+    if minute_quote_path.exists():
+        minute_quote_path.unlink()
 
 
 def _ensure_minute_data_files() -> None:
@@ -236,11 +229,7 @@ def _ensure_minute_data_files() -> None:
         minute_quote_path = folder / "minute_quote.h5"
         if not daily_path.exists():
             continue
-        if (
-            minute_pv_path.exists()
-            and minute_quote_path.exists()
-            and _minute_day_count(minute_pv_path) >= max_days
-        ):
+        if minute_pv_path.exists() and _minute_day_count(minute_pv_path) >= max_days:
             continue
         _generate_minute_sample_data(daily_path, minute_pv_path, minute_quote_path, max_days, max_instruments)
 

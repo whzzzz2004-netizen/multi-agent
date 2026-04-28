@@ -4,18 +4,18 @@ evaluator_code_feedback_v1_system: |-
   {{ scenario }}
   User will provide you the information of the factor.
 
-  Your job is to check whether user's code is align with the factor and the scenario.
+  Your job is to check whether user's code is aligned with the factor and the scenario.
   The user will provide the source python code and the execution error message if execution failed.
   The user might provide you the ground truth code for you to provide the critic. You should not leak the ground truth code to the user in any form but you can use it to provide the critic.
 
   User has also compared the factor values calculated by the user's code and the ground truth code. The user will provide you some analyze result comparing two output. You may find some error in the code which caused the difference between the two output.
 
-  If the ground truth code is provided, your critic should only consider checking whether the user's code is align with the ground truth code since the ground truth is definitely correct.
-  If the ground truth code is not provided, your critic should consider checking whether the user's code is reasonable and correct.
+  If the ground truth code is provided, your critic should only consider checking whether the user's code is aligned with the ground truth code since the ground truth is definitely correct.
+  If the ground truth code is not provided, your critic should consider whether the user's code is broadly consistent with the factor description and the available source data.
 
   Notice that your critics are not for user to debug the code. They are sent to the coding agent to correct the code. So don't give any following items for the user to check like "Please check the code line XXX".
 
-  You suggestion should not include any code, just some clear and short suggestions. Please point out very critical issues in your response, ignore non-important issues to avoid confusion. If no big issue found in the code, you can response "No critics found".
+  You suggestion should not include any code, just some clear and short suggestions. Only report a critic when the code clearly violates the factor description, uses unavailable data, introduces future information, or cannot reasonably produce the described factor. Ignore minor implementation preferences. If no big issue found in the code, you can response "No critics found".
   
   You should provide the suggestion to each of your critic to help the user improve the code. Please response the critic in the following format. Here is an example structure for the output:
   critic 1: The critic message to critic 1
@@ -72,13 +72,15 @@ evolving_strategy_factor_implementation_v1_system: |-
       # Read the appropriate source file from the shared data directory - all data files use key="data"
       # Examples:
       #   daily_pv.h5           -> daily OHLCV
-      #   minute_pv.h5          -> minute OHLCV/VWAP
-      #   minute_quote.h5       -> minute bid/ask sample
+      #   minute_pv.h5          -> minute bar data
       df = pd.read_hdf(DATA_DIR / "daily_pv.h5", key="data")
 
       # Calculate your factor here
       # For daily rolling calculations on MultiIndex data:
       # df['FACTOR_NAME'] = df.groupby(level='instrument')['$close'].pct_change(10)
+      # df['FACTOR_NAME'] = df.groupby(level='instrument')['$turnover_rate'].transform(
+      #     lambda x: x.rolling(window=20, min_periods=1).mean()
+      # )
       #
       # For minute-to-daily aggregation:
       # minute_df = df.reset_index()
@@ -115,6 +117,7 @@ evolving_strategy_factor_implementation_v1_system: |-
   10. You may use either daily or minute-level source files, but the final output MUST be daily: one factor value per trading day and instrument
   11. ONLY use files and columns explicitly listed in the scenario's source data description. Do NOT assume extra tables, extra fields, fundamentals, financial statements, analyst expectations, industry labels, market cap, or any hidden data exist
   12. If the factor clearly requires unavailable data, do not try to fake it with guessed fields or invented formulas. Keep the implementation aligned to the actually available source data only
+  13. For daily rolling windows, use integer trading-day windows such as 20, 60, or 120. Do NOT use calendar windows such as pd.DateOffset(months=1), "30D", or other non-fixed time offsets in pandas rolling.
 
   Please response the code in the following json format. Here is an example structure for the JSON output:
   {

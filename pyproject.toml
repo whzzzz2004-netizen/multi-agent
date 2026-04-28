@@ -32,6 +32,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 
 [project.scripts]
+data = "rdagent.app.cli:data_app"
 daily_factor = "rdagent.app.cli:daily_factor_app"
 minute_factor = "rdagent.app.cli:minute_factor_app"
 paper_factor = "rdagent.app.cli:paper_factor_app"

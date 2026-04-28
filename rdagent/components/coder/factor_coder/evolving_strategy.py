@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from pathlib import Path
 from typing import Dict, Generator
@@ -34,7 +35,7 @@ def get_factor_template() -> str:
 
 
 class FactorMultiProcessEvolvingStrategy(MultiProcessEvolvingStrategy):
-    MAX_CONSECUTIVE_OUTPUT_WITHOUT_ACCEPT = 5
+    MAX_CONSECUTIVE_OUTPUT_WITHOUT_ACCEPT = int(os.environ.get("RDAGENT_FACTOR_MAX_CONSECUTIVE_OUTPUT_WITHOUT_ACCEPT", "5"))
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -64,6 +65,8 @@ class FactorMultiProcessEvolvingStrategy(MultiProcessEvolvingStrategy):
                 if cls._has_output_but_not_accepted(fb):
                     consecutive_failures += 1
                     if consecutive_failures >= cls.MAX_CONSECUTIVE_OUTPUT_WITHOUT_ACCEPT:
+                        if cls.MAX_CONSECUTIVE_OUTPUT_WITHOUT_ACCEPT <= 0:
+                            break
                         queried_knowledge.failed_task_info_set.add(task_info)
                         break
                 else:
