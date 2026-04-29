@@ -25,7 +25,7 @@ class FactorCoSTEERSettings(CoSTEERSettings):
     select_method: str = "random"
     """Method for the selection of factors implementation"""
 
-    python_bin: str = "python"
+    python_bin: str = "/home/dministrator/miniconda3/envs/torch-pip/bin/python"
     """Path to the Python binary"""
 
     min_abs_ic: float = 0.005

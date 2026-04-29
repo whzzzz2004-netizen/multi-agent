@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+import os
 import shutil
 from pathlib import Path
 
@@ -15,6 +17,7 @@ PAPERS_DIR = ROOT / "papers"
 TEMPLATE_DIR = ROOT / "rdagent" / "scenarios" / "qlib" / "experiment" / "factor_data_template"
 FACTOR_DATA_DIR = ROOT / "git_ignore_folder" / "factor_implementation_source_data"
 FACTOR_DATA_DEBUG_DIR = ROOT / "git_ignore_folder" / "factor_implementation_source_data_debug"
+JQ_META_FILENAME = "jq_data_meta.json"
 FULL_SAMPLE_DAYS = 252
 DEBUG_SAMPLE_DAYS = 60
 FULL_SAMPLE_INSTRUMENTS = 80
@@ -84,6 +87,228 @@ def _ensure_daily_turnover_columns(df: pd.DataFrame) -> pd.DataFrame:
     if "$turnover" not in result.columns:
         result["$turnover"] = result["$turnover_rate"]
     return result
+
+
+def _jq_credentials() -> tuple[str, str]:
+    username = os.environ.get("JQDATA_USERNAME", "").strip()
+    password = os.environ.get("JQDATA_PASSWORD", "").strip()
+    if not username or not password:
+        raise RuntimeError(
+            "JQDATA_USERNAME or JQDATA_PASSWORD is not set. "
+            "Put them in .env before running init_workspace so real JQData can be downloaded."
+        )
+    return username, password
+
+
+def _meta_current(path: Path) -> bool:
+    meta_path = path / JQ_META_FILENAME
+    if not meta_path.exists():
+        return False
+    try:
+        meta = json.loads(meta_path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        return False
+    return meta.get("updated_on") == pd.Timestamp.today().strftime("%Y-%m-%d")
+
+
+def _normalize_instrument(code: str) -> str:
+    code = str(code)
+    return code
+
+
+def _to_multiindex_dataframe(df: pd.DataFrame, instrument: str) -> pd.DataFrame:
+    out = df.copy()
+    out = out.reset_index()
+    datetime_col = next((c for c in out.columns if "date" in str(c).lower() or "time" in str(c).lower()), out.columns[0])
+    out["datetime"] = pd.to_datetime(out[datetime_col])
+    out["instrument"] = _normalize_instrument(instrument)
+    return out.set_index(["datetime", "instrument"]).sort_index()
+
+
+def _fetch_jq_turnover_rate(jq_module, stock: str, start_date: pd.Timestamp, end_date: pd.Timestamp) -> pd.DataFrame:
+    try:
+        valuation = jq_module.get_valuation(
+            stock,
+            start_date=start_date.date(),
+            end_date=end_date.date(),
+            fields=["day", "turnover_ratio"],
+        )
+    except Exception:  # noqa: BLE001
+        return pd.DataFrame()
+    if valuation is None or valuation.empty:
+        return pd.DataFrame()
+    valuation = valuation.rename(columns={"day": "datetime", "turnover_ratio": "$turnover_rate"})
+    valuation["datetime"] = pd.to_datetime(valuation["datetime"])
+    valuation["instrument"] = _normalize_instrument(stock)
+    valuation["$turnover"] = valuation["$turnover_rate"]
+    return valuation.set_index(["datetime", "instrument"]).sort_index()[["$turnover_rate", "$turnover"]]
+
+
+def _fetch_jq_daily_data(jq_module, stock: str, start_date: pd.Timestamp, end_date: pd.Timestamp) -> pd.DataFrame:
+    fields = ["open", "high", "low", "close", "volume", "money", "factor", "avg", "paused"]
+    daily = jq_module.get_price(
+        stock,
+        start_date=start_date.date(),
+        end_date=end_date.date(),
+        fq="post",
+        frequency="daily",
+        fields=fields,
+    )
+    if daily is None or daily.empty:
+        return pd.DataFrame()
+    out = _to_multiindex_dataframe(daily, stock)
+    out = out.rename(
+        columns={
+            "open": "$open",
+            "high": "$high",
+            "low": "$low",
+            "close": "$close",
+            "volume": "$volume",
+            "money": "$amount",
+            "factor": "$factor",
+            "avg": "$avg",
+            "paused": "$paused",
+        }
+    )
+    turnover = _fetch_jq_turnover_rate(jq_module, stock, start_date, end_date)
+    if not turnover.empty:
+        out = out.join(turnover, how="left")
+    return _ensure_daily_turnover_columns(out.replace([np.inf, -np.inf], np.nan))
+
+
+def _fetch_jq_minute_data(jq_module, stock: str, start_date: pd.Timestamp, end_date: pd.Timestamp) -> pd.DataFrame:
+    fields = ["open", "high", "low", "close", "volume", "money", "factor", "avg", "paused"]
+    minute = jq_module.get_price(
+        stock,
+        start_date=start_date.strftime("%Y-%m-%d 09:30:00"),
+        end_date=end_date.strftime("%Y-%m-%d 15:00:00"),
+        fq="post",
+        frequency="minute",
+        fields=fields,
+    )
+    if minute is None or minute.empty:
+        return pd.DataFrame()
+    out = _to_multiindex_dataframe(minute, stock)
+    out = out.rename(
+        columns={
+            "open": "$open",
+            "high": "$high",
+            "low": "$low",
+            "close": "$close",
+            "volume": "$volume",
+            "money": "$amount",
+            "factor": "$factor",
+            "avg": "$vwap",
+            "paused": "$paused",
+        }
+    )
+    if "$vwap" not in out.columns and {"$amount", "$volume"}.issubset(out.columns):
+        volume = pd.to_numeric(out["$volume"], errors="coerce").replace(0, np.nan)
+        out["$vwap"] = pd.to_numeric(out["$amount"], errors="coerce") / volume
+    return out.replace([np.inf, -np.inf], np.nan).sort_index()
+
+
+def _write_jq_bundle(folder: Path, daily: pd.DataFrame, minute_pv: pd.DataFrame, metadata: dict[str, object]) -> None:
+    folder.mkdir(parents=True, exist_ok=True)
+    daily.to_hdf(folder / "daily_pv.h5", key="data")
+    minute_pv.to_hdf(folder / "minute_pv.h5", key="data")
+    legacy_quote_path = folder / "minute_quote.h5"
+    if legacy_quote_path.exists():
+        legacy_quote_path.unlink()
+    (folder / "README.md").write_text(
+        (
+            "# Factor source data\n\n"
+            "Generated from JQData and stored with key `data`.\n\n"
+            f"- `daily_pv.h5`: MultiIndex ['datetime', 'instrument']; columns {list(daily.columns)}\n"
+            f"- `minute_pv.h5`: MultiIndex ['datetime', 'instrument']; columns {list(minute_pv.columns)}\n"
+        ),
+        encoding="utf-8",
+    )
+    (folder / JQ_META_FILENAME).write_text(json.dumps(metadata, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def _debug_subset(df: pd.DataFrame, max_days: int, max_instruments: int) -> pd.DataFrame:
+    if df.empty:
+        return df
+    instruments = list(dict.fromkeys(df.index.get_level_values("instrument")))
+    chosen_instruments = instruments[:max_instruments]
+    inst = df.index.get_level_values("instrument")
+    # Keep the full history in debug mode and only shrink the instrument universe.
+    # Sequence models such as GRU/TCN need a continuous time span to form train/test windows.
+    mask = inst.isin(chosen_instruments)
+    return df.loc[mask].sort_index()
+
+
+def _download_real_jq_factor_data(force: bool = False) -> list[str]:
+    if (
+        not force
+        and _is_valid_daily_factor_file(FACTOR_DATA_DIR / "daily_pv.h5")
+        and (FACTOR_DATA_DIR / "minute_pv.h5").exists()
+        and _meta_current(FACTOR_DATA_DIR)
+    ):
+        return ["Using current JQData factor data."]
+
+    try:
+        import jqdatasdk as jq_module
+    except ModuleNotFoundError as exc:
+        raise RuntimeError("jqdatasdk is not installed. Install project requirements first.") from exc
+
+    username, password = _jq_credentials()
+    jq_module.auth(username, password)
+
+    end_date = pd.Timestamp.today().normalize()
+    start_date = end_date - pd.DateOffset(years=3)
+    securities = jq_module.get_all_securities(types=["stock"], date=end_date.date())
+    if securities is None or securities.empty:
+        raise RuntimeError("JQData returned no stock universe.")
+    securities = securities[securities["end_date"] >= start_date]
+    securities = securities.sort_index(kind="stable").head(FULL_SAMPLE_INSTRUMENTS)
+    stocks = list(securities.index.astype(str))
+    if not stocks:
+        raise RuntimeError("No eligible stocks were returned from JQData.")
+
+    daily_frames: list[pd.DataFrame] = []
+    minute_frames: list[pd.DataFrame] = []
+    for stock in stocks:
+        stock_start = max(pd.Timestamp(securities.loc[stock, "start_date"]), start_date)
+        stock_end = min(pd.Timestamp(securities.loc[stock, "end_date"]), end_date)
+        daily_df = _fetch_jq_daily_data(jq_module, stock, stock_start, stock_end)
+        minute_df = _fetch_jq_minute_data(jq_module, stock, stock_start, stock_end)
+        if not daily_df.empty:
+            daily_frames.append(daily_df)
+        if not minute_df.empty:
+            minute_frames.append(minute_df)
+
+    if not daily_frames:
+        raise RuntimeError("JQData returned no daily data.")
+    if not minute_frames:
+        raise RuntimeError("JQData returned no minute data.")
+
+    daily = pd.concat(daily_frames).sort_index()
+    minute_pv = pd.concat(minute_frames).sort_index()
+    metadata = {
+        "source": "jqdatasdk",
+        "updated_on": pd.Timestamp.today().strftime("%Y-%m-%d"),
+        "start_date": str(start_date.date()),
+        "end_date": str(end_date.date()),
+        "years": 3,
+        "stock_count": len(stocks),
+        "daily_rows": int(daily.shape[0]),
+        "minute_rows": int(minute_pv.shape[0]),
+    }
+    _write_jq_bundle(FACTOR_DATA_DIR, daily, minute_pv, metadata)
+    _write_jq_bundle(
+        FACTOR_DATA_DEBUG_DIR,
+        _debug_subset(daily, DEBUG_SAMPLE_DAYS, DEBUG_SAMPLE_INSTRUMENTS),
+        _debug_subset(minute_pv, DEBUG_SAMPLE_DAYS, DEBUG_SAMPLE_INSTRUMENTS),
+        metadata | {"debug": True},
+    )
+    return [
+        f"Prepared real JQData daily factor data: {FACTOR_DATA_DIR / 'daily_pv.h5'}",
+        f"Prepared real JQData minute factor data: {FACTOR_DATA_DIR / 'minute_pv.h5'}",
+        f"Prepared real JQData debug daily factor data: {FACTOR_DATA_DEBUG_DIR / 'daily_pv.h5'}",
+        f"Prepared real JQData debug minute factor data: {FACTOR_DATA_DEBUG_DIR / 'minute_pv.h5'}",
+    ]
 
 
 def _generate_synthetic_daily_factor_file(
@@ -267,92 +492,35 @@ def _ensure_env_file(force: bool = False) -> str:
 
 
 def _ensure_factor_data(force: bool = False) -> list[str]:
-    actions: list[str] = []
-    full_data_dir = FACTOR_DATA_DIR
-    debug_data_dir = FACTOR_DATA_DEBUG_DIR
-    _ensure_dir(full_data_dir)
-    _ensure_dir(debug_data_dir)
-    full_template_path = TEMPLATE_DIR / "daily_pv_all.h5"
-    debug_template_path = TEMPLATE_DIR / "daily_pv_debug.h5"
-    full_target_path = full_data_dir / "daily_pv.h5"
-    debug_target_path = debug_data_dir / "daily_pv.h5"
-
-    full_method = None
-    debug_method = None
-    if force or not _is_valid_daily_factor_file(full_target_path):
-        built_from_template = _build_compact_daily_dataset(
-            full_template_path,
-            full_target_path,
-            max_days=FULL_SAMPLE_DAYS,
-            max_instruments=FULL_SAMPLE_INSTRUMENTS,
-        )
-        if built_from_template:
-            full_method = "template_subset"
-        else:
-            _generate_synthetic_daily_factor_file(
-                full_target_path,
-                n_days=FULL_SAMPLE_DAYS,
-                n_instruments=FULL_SAMPLE_INSTRUMENTS,
-            )
-            full_method = "synthetic"
-    if force or not _is_valid_daily_factor_file(debug_target_path):
-        built_from_template = _build_compact_daily_dataset(
-            debug_template_path,
-            debug_target_path,
-            max_days=DEBUG_SAMPLE_DAYS,
-            max_instruments=DEBUG_SAMPLE_INSTRUMENTS,
-        )
-        if built_from_template:
-            debug_method = "template_subset"
-        else:
-            if _is_valid_daily_factor_file(full_target_path):
-                _build_compact_daily_dataset(
-                    full_target_path,
-                    debug_target_path,
-                    max_days=DEBUG_SAMPLE_DAYS,
-                    max_instruments=DEBUG_SAMPLE_INSTRUMENTS,
-                )
-                debug_method = "full_subset"
-            else:
-                _generate_synthetic_daily_factor_file(
-                    debug_target_path,
-                    n_days=DEBUG_SAMPLE_DAYS,
-                    n_instruments=DEBUG_SAMPLE_INSTRUMENTS,
-                )
-                debug_method = "synthetic"
-    copied_full_readme = _copy_if_missing(TEMPLATE_DIR / "README.md", full_data_dir / "README.md", force=force)
-    copied_debug_readme = _copy_if_missing(TEMPLATE_DIR / "README.md", debug_data_dir / "README.md", force=force)
-
-    full_ready = _is_valid_daily_factor_file(full_target_path)
-    debug_ready = _is_valid_daily_factor_file(debug_target_path)
-
-    if not (full_ready and debug_ready):
-        raise RuntimeError(
-            "Failed to prepare compact factor data during init. "
-            f"Expected valid files at {full_target_path} and {debug_target_path}."
-        )
-
-    if full_method is not None:
-        actions.append(f"Prepared compact daily factor data ({full_method}): {full_target_path}")
-    elif full_ready:
-        actions.append(f"Using daily factor data: {full_target_path}")
-    if debug_method is not None:
-        actions.append(f"Prepared compact debug daily factor data ({debug_method}): {debug_target_path}")
-    elif debug_ready:
-        actions.append(f"Using debug daily factor data: {debug_target_path}")
-    if copied_full_readme or copied_debug_readme:
-        actions.append("Prepared factor data README files.")
-
-    _ensure_minute_data_files()
-    actions.append(f"Prepared minute factor data: {full_data_dir / 'minute_pv.h5'}")
-    actions.append(f"Prepared debug minute factor data: {debug_data_dir / 'minute_pv.h5'}")
-    return actions
+    _ensure_dir(FACTOR_DATA_DIR)
+    _ensure_dir(FACTOR_DATA_DEBUG_DIR)
+    return _download_real_jq_factor_data(force=force)
 
 
-def init_workspace(force: bool = False) -> dict[str, list[str] | str]:
+def _ingest_factor_improvement_knowledge() -> list[str]:
+    from rdagent.app.qlib_rd_loop.paper_improvement import ingest_factor_improvement_papers
+
+    report_folder = PAPERS_DIR / "factor_improvement"
+    pdf_count = len(list(report_folder.rglob("*.pdf")))
+    if pdf_count == 0:
+        return [f"No factor-improvement papers found under {report_folder}."]
+
+    updated_count = ingest_factor_improvement_papers(report_folder=str(report_folder))
+    return [
+        f"Ingested {updated_count} factor-improvement paper(s) into the paper-improvement knowledge base."
+    ]
+
+
+def init_workspace(
+    force: bool = False,
+    *,
+    ingest_factor_improvement: bool = False,
+) -> dict[str, list[str] | str]:
     created_dirs = [str(path) for path in _ensure_workspace_dirs()]
     env_message = _ensure_env_file(force=force)
     data_actions = _ensure_factor_data(force=force)
+    if ingest_factor_improvement:
+        data_actions.extend(_ingest_factor_improvement_knowledge())
 
     summary = {
         "created_dirs": created_dirs,

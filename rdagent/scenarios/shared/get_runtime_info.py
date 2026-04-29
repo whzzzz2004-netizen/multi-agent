@@ -10,10 +10,13 @@ def get_runtime_environment_by_env(env: Env) -> str:
     implementation = FBWorkspace()
     fname = "runtime_info.py"
     implementation.inject_files(**{fname: (Path(__file__).absolute().resolve().parent / "runtime_info.py").read_text()})
-    stdout = implementation.execute(env=env, entry=f"python {fname}")
-    # Extract JSON from stdout (skip CUDA/container warnings)
-    json_match = re.search(r"\{.*\}", stdout, re.DOTALL)
-    return json.dumps(json.loads(json_match.group()), indent=2)
+    try:
+        stdout = implementation.execute(env=env, entry=f"python {fname}")
+        # Extract JSON from stdout (skip CUDA/container warnings)
+        json_match = re.search(r"\{.*\}", stdout, re.DOTALL)
+        return json.dumps(json.loads(json_match.group()), indent=2)
+    finally:
+        implementation.clear()
 
 
 def check_runtime_environment(env: Env) -> str:

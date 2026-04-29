@@ -12,7 +12,7 @@ from rdagent.app.qlib_rd_loop.conf import FACTOR_FROM_REPORT_PROP_SETTING
 from rdagent.app.qlib_rd_loop.factor import FactorRDLoop
 from rdagent.components.coder.factor_coder.config import FACTOR_COSTEER_SETTINGS
 from rdagent.components.coder.factor_coder.eva_utils import evaluate_factor_ic_from_workspace
-from rdagent.components.coder.factor_coder.factor import FactorTask
+from rdagent.components.coder.factor_coder.factor import FactorExperiment, FactorFBWorkspace, FactorTask
 from rdagent.components.document_reader.document_reader import (
     extract_first_page_screenshot_from_pdf,
     load_and_process_pdfs_by_langchain,
@@ -21,12 +21,22 @@ from rdagent.core.conf import RD_AGENT_SETTINGS
 from rdagent.core.proposal import Hypothesis, HypothesisFeedback
 from rdagent.log import rdagent_logger as logger
 from rdagent.oai.llm_utils import APIBackend
-from rdagent.scenarios.qlib.experiment.factor_experiment import QlibFactorExperiment
 from rdagent.scenarios.qlib.factor_experiment_loader.pdf_loader import (
     FactorExperimentLoaderFromPDFfiles,
 )
 from rdagent.utils.agent.tpl import T
 from rdagent.utils.workflow import LoopMeta
+
+
+class PaperFactorExperiment(FactorExperiment[FactorTask, FactorFBWorkspace, FactorFBWorkspace]):
+    """A lightweight experiment for paper_factor that avoids creating Qlib template workspaces."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.experiment_workspace = FactorFBWorkspace()
+        self.stdout = ""
+        self.base_features: dict[str, str] = {}
+        self.base_feature_codes: dict[str, str] = {}
 
 
 def _load_processed_report_paths() -> set[str]:
@@ -143,14 +153,13 @@ def _record_rejected_report_factor(task, feedback, source_report_path: str | Non
 
 
 def list_unprocessed_report_paths(report_folder: str | Path) -> list[Path]:
-    processed_report_paths = _load_processed_report_paths()
     folder = Path(report_folder)
     if not folder.exists():
         return []
     result: list[Path] = []
     for item in folder.rglob("*.pdf"):
         path = item.resolve()
-        if str(path) in processed_report_paths:
+        if _report_fully_processed(path):
             continue
         result.append(path)
     return sorted(result)
@@ -205,6 +214,75 @@ def build_lightweight_hypothesis(report_file_path: str, factor_result: dict) -> 
     )
 
 
+def _load_local_factor_data_profile() -> dict[str, Any]:
+    base_dir = Path.cwd() / "git_ignore_folder" / "factor_implementation_source_data"
+    meta_path = base_dir / "jq_data_meta.json"
+    profile: dict[str, Any] = {
+        "source": "local_factor_data",
+        "stock_count": "unknown",
+        "start_date": "unknown",
+        "end_date": "unknown",
+        "years": "unknown",
+        "daily_columns": [],
+        "minute_columns": [],
+    }
+    if meta_path.exists():
+        try:
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+            profile.update(
+                {
+                    "source": meta.get("source", profile["source"]),
+                    "stock_count": meta.get("stock_count", profile["stock_count"]),
+                    "start_date": meta.get("start_date", profile["start_date"]),
+                    "end_date": meta.get("end_date", profile["end_date"]),
+                    "years": meta.get("years", profile["years"]),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Failed to load local factor data metadata from {meta_path}: {exc}")
+    for file_name, field_name in [("daily_pv.h5", "daily_columns"), ("minute_pv.h5", "minute_columns")]:
+        data_path = base_dir / file_name
+        if not data_path.exists():
+            continue
+        try:
+            df = pd.read_hdf(data_path, key="data", start=0, stop=1)
+            profile[field_name] = list(df.columns)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Failed to inspect available columns from {data_path}: {exc}")
+    return profile
+
+
+def _adapt_report_task_for_available_data(task: FactorTask) -> FactorTask:
+    adapted_task = deepcopy(task)
+    data_profile = _load_local_factor_data_profile()
+    available_daily_columns = ", ".join(data_profile.get("daily_columns") or []) or "unknown"
+    available_minute_columns = ", ".join(data_profile.get("minute_columns") or []) or "unknown"
+    adaptation_note = (
+        "\n\nImplementation constraints for this paper_factor run:\n"
+        f"- Local data source: {data_profile.get('source')}.\n"
+        f"- Available stock universe: about {data_profile.get('stock_count')} stocks.\n"
+        f"- Available history window: {data_profile.get('start_date')} to {data_profile.get('end_date')} "
+        f"(about {data_profile.get('years')} year(s)).\n"
+        f"- Available daily fields: {available_daily_columns}.\n"
+        f"- Available minute fields: {available_minute_columns}.\n"
+        "- Prefer an executable approximation over strict paper-faithful reproduction when local data is limited.\n"
+        "- Choose the implementation style according to the local data range. Do not hard-code the paper's original "
+        "sample length, universe size, retraining horizon, or validation horizon when local data is smaller.\n"
+        "- Use only the locally available universe and history. If only a subset of stocks is available, compute the factor on that subset.\n"
+        "- If the paper requires a longer training window than available, use the maximum available history without failing. "
+        "For example, if the paper asks for 10 years but local data has about 3 years, redesign the train/validation split "
+        "within those 3 years instead of returning no prediction.\n"
+        "- If the paper requires a larger stock universe than available, train or compute on the available instruments only.\n"
+        "- If the paper describes a complex model pipeline (for example GRU/TCN with rolling retraining), keep the core method but simplify it so it can run on local data.\n"
+        "- When there is not enough data for annual rolling retraining, switch to a simpler expanding window or one-shot train/validation/test split that still avoids future leakage.\n"
+        "- When the method can be expressed in multiple ways, prefer the most robust implementation that matches the available columns and sample size.\n"
+        "- Preserve no-future-leakage and produce a daily factor dataframe even when using a simplified implementation.\n"
+        "- In short: use the method idea, adapt the sample window and universe to available data, and do not fail only because the local dataset is smaller than the paper setting."
+    )
+    adapted_task.description = f"{adapted_task.factor_description}{adaptation_note}"
+    return adapted_task
+
+
 def _persist_extracted_factor_preview(
     report_file_path: str,
     *,
@@ -234,7 +312,33 @@ def _extracted_factor_preview_path(report_file_path: str | Path) -> Path:
     return Path.cwd() / "git_ignore_folder" / "factor_outputs" / "extracted_reports" / f"{report_path.stem}.extracted.json"
 
 
-def _load_exp_from_extracted_factor_preview(report_file_path: str, *, minimal_mode: bool) -> QlibFactorExperiment | None:
+def _load_extracted_factor_count(report_file_path: str | Path) -> int | None:
+    preview_path = _extracted_factor_preview_path(report_file_path)
+    if not preview_path.exists():
+        return None
+    try:
+        payload = json.loads(preview_path.read_text(encoding="utf-8"))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(f"Failed to read extracted factor count from {preview_path}: {exc}")
+        return None
+    factors = payload.get("factors") or {}
+    if not isinstance(factors, dict):
+        return None
+    return len(factors)
+
+
+def _report_fully_processed(report_path: str | Path) -> bool:
+    resolved_report_path = Path(report_path).resolve()
+    if str(resolved_report_path) in _load_processed_report_paths():
+        return True
+    extracted_factor_count = _load_extracted_factor_count(resolved_report_path)
+    if extracted_factor_count is None:
+        return False
+    terminal_factor_count = len(_load_terminal_report_factor_names(resolved_report_path))
+    return terminal_factor_count >= extracted_factor_count > 0
+
+
+def _load_exp_from_extracted_factor_preview(report_file_path: str, *, minimal_mode: bool) -> PaperFactorExperiment | None:
     preview_path = _extracted_factor_preview_path(report_file_path)
     if not preview_path.exists():
         return None
@@ -261,7 +365,7 @@ def _load_exp_from_extracted_factor_preview(report_file_path: str, *, minimal_mo
     if not tasks:
         return None
     report_path = Path(report_file_path).resolve()
-    exp = QlibFactorExperiment(sub_tasks=tasks, hypothesis=build_lightweight_hypothesis(report_path.stem, factors))
+    exp = PaperFactorExperiment(sub_tasks=tasks, hypothesis=build_lightweight_hypothesis(report_path.stem, factors))
     exp.source_report_path = str(report_path)
     exp.source_report_title = report_path.stem
     logger.info(f"Loaded extracted factor cache from {preview_path}. factor_count={len(tasks)}")
@@ -273,7 +377,7 @@ def extract_hypothesis_and_exp_from_reports(
     report_file_path: str,
     *,
     minimal_mode: bool = True,
-) -> QlibFactorExperiment | None:
+) -> PaperFactorExperiment | None:
     """
     Extract hypothesis and experiment details from report files.
 
@@ -281,7 +385,7 @@ def extract_hypothesis_and_exp_from_reports(
         report_file_path (str): Path to the report file.
 
     Returns:
-        QlibFactorExperiment: An instance of QlibFactorExperiment containing the extracted details.
+        PaperFactorExperiment: A lightweight experiment containing the extracted details.
         None: If no valid experiment is found in the report.
     """
     if os.environ.get("RDAGENT_PAPER_FACTOR_FAST", "").strip().lower() in {"1", "true", "yes", "on"}:
@@ -350,7 +454,7 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
         os.environ.setdefault("RDAGENT_FACTOR_MAX_CONSECUTIVE_OUTPUT_WITHOUT_ACCEPT", "0")
         self.minimal_mode = minimal_mode
         self.report_cursor = 0
-        self.pending_report_exp: QlibFactorExperiment | None = None
+        self.pending_report_exp: PaperFactorExperiment | None = None
         self.pending_report_factor_idx = 0
         self.pending_report_factor_total = 0
         self.pending_report_extracted_count = 0
@@ -391,7 +495,7 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
         while True:
             if self.get_unfinished_loop_cnt(self.loop_idx) == 0:
                 exp = self._next_single_factor_exp()
-                exp.based_experiments = [QlibFactorExperiment(sub_tasks=[], hypothesis=exp.hypothesis)] + [
+                exp.based_experiments = [PaperFactorExperiment(sub_tasks=[], hypothesis=exp.hypothesis)] + [
                     t[0] for t in self.trace.hist if t[1]
                 ]
                 exp.base_features = self.plan["features"]
@@ -402,7 +506,7 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
                 return exp
             await asyncio.sleep(1)
 
-    def _next_single_factor_exp(self) -> QlibFactorExperiment:
+    def _next_single_factor_exp(self) -> PaperFactorExperiment:
         while self.pending_report_exp is None or self.pending_report_factor_idx >= self.pending_report_factor_total:
             if self.report_cursor >= len(self.judge_pdf_data_items) or self.report_cursor >= FACTOR_FROM_REPORT_PROP_SETTING.report_limit:
                 raise self.LoopTerminationError("Reach stop criterion and stop loop")
@@ -454,7 +558,7 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
         self.pending_report_factor_idx += 1
 
         single_exp = deepcopy(source_exp)
-        single_exp.sub_tasks = [source_exp.sub_tasks[factor_idx]]
+        single_exp.sub_tasks = [_adapt_report_task_for_available_data(source_exp.sub_tasks[factor_idx])]
         if source_exp.sub_workspace_list:
             single_exp.sub_workspace_list = [source_exp.sub_workspace_list[factor_idx]]
         else:

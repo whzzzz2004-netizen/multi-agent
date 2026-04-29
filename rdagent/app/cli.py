@@ -34,7 +34,6 @@ minute_factor_app = typer.Typer()
 paper_factor_app = typer.Typer()
 data_app = typer.Typer()
 DEFAULT_PAPER_REPORT_FOLDER = str(Path.cwd() / "papers" / "inbox")
-DEFAULT_PAPER_DEMO_REPORT = str(Path.cwd() / "papers" / "inbox" / "华泰多因子系列5：单因子测试之换手率类因子.pdf")
 DEFAULT_FACTOR_IMPROVEMENT_FOLDER = str(Path.cwd() / "papers" / "factor_improvement")
 DEFAULT_FACTOR_PAPER_QUERY = (
     "(cat:q-fin.ST OR cat:q-fin.PM OR cat:q-fin.TR) AND "
@@ -385,8 +384,8 @@ def paper_factor_entry(
         help="Folder containing PDF factor reports",
     ),
     report_file: Optional[str] = typer.Option(
-        DEFAULT_PAPER_DEMO_REPORT,
-        help="Specific PDF report to process. Defaults to the Huatai turnover-factor report for demo use.",
+        None,
+        help="Specific PDF report to process. If omitted, paper_factor scans the report folder for unprocessed papers.",
     ),
     path: Optional[str] = None,
     all_duration: Optional[str] = None,
@@ -563,8 +562,8 @@ def paper_factor_cli(
         help="Folder containing PDF factor reports",
     ),
     report_file: Optional[str] = typer.Option(
-        DEFAULT_PAPER_DEMO_REPORT,
-        help="Specific PDF report to process. Defaults to the Huatai turnover-factor report for demo use.",
+        None,
+        help="Specific PDF report to process. If omitted, paper_factor scans the report folder for unprocessed papers.",
     ),
     path: Optional[str] = None,
     all_duration: Optional[str] = None,
@@ -818,7 +817,7 @@ def init_cli(
     """Create local workspace directories and prepare bundled starter data."""
     from rdagent.app.utils.init_workspace import init_workspace
 
-    summary = init_workspace(force=force)
+    summary = init_workspace(force=force, ingest_factor_improvement=True)
     typer.echo("RD-Agent workspace initialized.")
     typer.echo(f"Env: {summary['env']}")
     typer.echo("Directories:")

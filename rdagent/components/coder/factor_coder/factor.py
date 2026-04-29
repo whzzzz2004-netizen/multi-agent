@@ -116,6 +116,13 @@ class FactorFBWorkspace(FBWorkspace):
     def _sanitize_factor_name(name: str) -> str:
         return "".join(c if c.isalnum() or c in ("-", "_") else "_" for c in name).strip("_") or "factor"
 
+    def _resolve_export_dir(self, review_metadata: dict[str, Any] | None = None) -> Path:
+        review_metadata = review_metadata or {}
+        if review_metadata.get("source_type") == "literature_report":
+            report_title = str(review_metadata.get("source_report_title") or "unknown_report")
+            return self.EXPORTED_PARQUET_DIR / "literature_reports" / self._sanitize_factor_name(report_title)
+        return self.EXPORTED_PARQUET_DIR
+
     @staticmethod
     def _hash_factor_dataframe(df: pd.DataFrame) -> str:
         hashed = pd.util.hash_pandas_object(df, index=True).values
@@ -290,7 +297,16 @@ class FactorFBWorkspace(FBWorkspace):
         )
         if manifest_path.exists():
             manifest = pd.read_csv(manifest_path)
-            manifest = manifest[manifest["factor_name"] != factor_name]
+            same_factor = manifest["factor_name"].astype(str) == factor_name
+            source_report_path = (review_metadata or {}).get("source_report_path")
+            if source_report_path and "source_report_path" in manifest.columns:
+                same_report = (
+                    manifest["source_report_path"].fillna("").astype(str).map(lambda p: str(Path(p).resolve()) if p else "")
+                    == str(Path(source_report_path).resolve())
+                )
+                manifest = manifest[~(same_factor & same_report)]
+            else:
+                manifest = manifest[~same_factor]
             manifest = pd.concat([manifest, row], ignore_index=True)
         else:
             manifest = row
@@ -334,8 +350,10 @@ class FactorFBWorkspace(FBWorkspace):
             return
 
         self.EXPORTED_PARQUET_DIR.mkdir(parents=True, exist_ok=True)
+        export_dir = self._resolve_export_dir(review_metadata)
+        export_dir.mkdir(parents=True, exist_ok=True)
         factor_name = self._sanitize_factor_name(str(df.columns[0]))
-        latest_path = self.EXPORTED_PARQUET_DIR / f"{factor_name}.parquet"
+        latest_path = export_dir / f"{factor_name}.parquet"
         current_hash = self._hash_factor_dataframe(df)
 
         if latest_path.exists():
@@ -359,7 +377,7 @@ class FactorFBWorkspace(FBWorkspace):
 
         if self._env_flag("FACTOR_EXPORT_KEEP_SNAPSHOTS"):
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-            snapshot_path = self.EXPORTED_PARQUET_DIR / f"{timestamp}__{factor_name}.parquet"
+            snapshot_path = export_dir / f"{timestamp}__{factor_name}.parquet"
             df.to_parquet(snapshot_path, engine="pyarrow")
 
     def export_reviewed_factor(
