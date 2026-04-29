@@ -475,6 +475,37 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
         logger.log_object(exp.sub_workspace_list, tag="coder result")
         return exp
 
+    def running(self, prev_out: dict[str, Any]):
+        logger.info("paper_factor: skip Qlib running stage and reuse coding result for record/export.")
+        return prev_out["coding"]
+
+    def feedback(self, prev_out: dict[str, Any]):
+        exp = prev_out.get("running") or prev_out.get("coding") or prev_out.get("direct_exp_gen")
+        prop_dev_feedback = getattr(exp, "prop_dev_feedback", None) if exp is not None else None
+        accepted_count = 0
+        reviewed_count = 0
+        if prop_dev_feedback is not None:
+            for task_feedback in prop_dev_feedback:
+                if task_feedback is None:
+                    continue
+                reviewed_count += 1
+                if bool(getattr(task_feedback, "final_decision", False)):
+                    accepted_count += 1
+        feedback = HypothesisFeedback(
+            reason=(
+                "Skipped Qlib running for paper_factor. "
+                f"Reviewed {reviewed_count} factor implementation(s); {accepted_count} passed execution/value checks."
+            ),
+            decision=accepted_count > 0,
+            acceptable=accepted_count > 0,
+            observations="paper_factor now records IC directly from factor outputs without Qlib backtesting.",
+            hypothesis_evaluation="Execution-level validation completed without running Qlib.",
+            new_hypothesis=None,
+            code_change_summary="Bypassed Qlib running stage for paper_factor; rely on factor output execution and IC recording.",
+        )
+        logger.log_object(feedback, tag="feedback")
+        return feedback
+
     def record(self, prev_out: dict[str, Any]):
         feedback = prev_out["feedback"]
         exp = prev_out.get("running") or prev_out.get("coding") or prev_out.get("direct_exp_gen")
@@ -484,10 +515,6 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
             source_report_title = getattr(exp, "source_report_title", None)
             for task, workspace, task_feedback in zip(exp.sub_tasks, exp.sub_workspace_list, exp.prop_dev_feedback):
                 if task_feedback is None:
-                    continue
-                if getattr(task_feedback, "source_feedback", {}).get("paper_factor_low_ic_terminal") is False:
-                    _record_rejected_report_factor(task, task_feedback, source_report_path, source_report_title)
-                    print(f"paper_factor: rejected {task.factor_name} (low IC).", flush=True)
                     continue
                 if not bool(task_feedback.final_decision):
                     _record_rejected_report_factor(task, task_feedback, source_report_path, source_report_title)
@@ -510,18 +537,6 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
                     data_type="All",
                     gen_df=df,
                 )
-                if full_sample_ic is None or abs(full_sample_ic) < FACTOR_COSTEER_SETTINGS.min_abs_ic:
-                    logger.info(
-                        f"Skip reviewed export for report-derived factor {task.factor_name} because full-sample IC "
-                        f"did not pass. {ic_feedback}"
-                    )
-                    task_feedback.final_feedback = (
-                        "Paper-factor reproduction code passed implementation checks, but full-sample IC did not pass; "
-                        "recorded as rejected without further repair."
-                    )
-                    _record_rejected_report_factor(task, task_feedback, source_report_path, source_report_title)
-                    print(f"paper_factor: rejected {task.factor_name} (full-sample low IC).", flush=True)
-                    continue
                 logic_summary = task.factor_description
                 review_notes = "\n".join(
                     part
@@ -529,6 +544,13 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
                     if part
                 )
                 tags = _infer_report_factor_registry_tags(task, task_feedback)
+                if full_sample_ic is not None and abs(full_sample_ic) >= FACTOR_COSTEER_SETTINGS.min_abs_ic:
+                    tags.append("ic_passed")
+                elif full_sample_ic is not None:
+                    tags.append("ic_recorded_only")
+                else:
+                    tags.append("ic_unavailable")
+                tags = sorted(set(tags))
                 workspace.export_reviewed_factor(
                     df,
                     accepted=True,

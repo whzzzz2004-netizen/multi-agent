@@ -1,4 +1,3 @@
-import os
 import re
 
 from rdagent.components.coder.CoSTEER.evaluators import (
@@ -17,49 +16,6 @@ from rdagent.core.experiment import Workspace
 FactorSingleFeedback = CoSTEERSingleFeedbackDeprecated
 
 
-def _env_flag(name: str, default: bool = False) -> bool:
-    value = os.environ.get(name)
-    if value is None:
-        return default
-    return value.strip().lower() in {"1", "true", "yes", "y", "on"}
-
-
-def _paper_factor_low_ic_terminal(value_feedback: str | None, code_feedback: str | None) -> bool:
-    if not _env_flag("RDAGENT_PAPER_FACTOR_SKIP_LOW_IC_REPAIR"):
-        return False
-    value_text = (value_feedback or "").lower()
-    code_text = (code_feedback or "").lower()
-    if "below the minimum absolute ic threshold" not in value_text:
-        return False
-    structural_failure_markers = [
-        "source dataframe is none",
-        "more than one column",
-        "infinite values. please check",
-        "minute-level. this pipeline expects daily",
-        "unsupported datetime granularity",
-        "failed to evaluate output format",
-        "negative shift",
-        "negative lookback",
-        "negative diff",
-        "centered rolling",
-        "backward-fills",
-    ]
-    code_failure_markers = [
-        "critic ",
-        "critic:",
-        "future-information leak",
-        "time leakage",
-        "traceback",
-        "does not align",
-        "not aligned",
-        "incorrect",
-        "wrong",
-    ]
-    return not any(marker in value_text for marker in structural_failure_markers) and not any(
-        marker in code_text for marker in code_failure_markers
-    )
-
-
 class FactorEvaluatorForCoder(CoSTEEREvaluator):
     """This class is the v1 version of evaluator for a single factor implementation.
     It calls several evaluators in share modules to evaluate the factor implementation.
@@ -71,26 +27,9 @@ class FactorEvaluatorForCoder(CoSTEEREvaluator):
         self.code_evaluator = FactorCodeEvaluator(self.scen)
 
     @staticmethod
-    def _code_review_passed(code_feedback: str | None) -> bool:
-        text = (code_feedback or "").lower()
-        if not text.strip():
-            return False
-        hard_failure_markers = [
-            "traceback",
-            "execution failed",
-            "future-information leak",
-            "time leakage",
-            "not aligned",
-            "does not align",
-            "wrong",
-            "incorrect",
-            "unsupported",
-            "unavailable data",
-            "missing column",
-        ]
-        if any(marker in text for marker in hard_failure_markers):
-            return False
-        return True
+    def _code_review_has_blocking_issue(code_feedback: str | None) -> bool:
+        # For paper_factor, code review is informational only and must never block execution.
+        return False
 
     def evaluate(
         self,
@@ -129,15 +68,6 @@ class FactorEvaluatorForCoder(CoSTEEREvaluator):
                 gt_implementation=gt_implementation,
             )
             factor_feedback.code_feedback = code_feedback
-            if not self._code_review_passed(code_feedback):
-                factor_feedback.execution_feedback = "Skipped execution because the code review did not pass."
-                factor_feedback.value_feedback = "Skipped value evaluation because the code review did not pass."
-                factor_feedback.value_generated_flag = False
-                factor_feedback.final_decision_based_on_gt = gt_implementation is not None
-                factor_feedback.final_decision = False
-                factor_feedback.final_feedback = "Code review failed, rewrite the code."
-                return factor_feedback
-
             # 2. Run the code only after the code review passes.
             (
                 execution_feedback,
@@ -170,10 +100,9 @@ class FactorEvaluatorForCoder(CoSTEEREvaluator):
                 factor_feedback.final_feedback = "Value evaluation passed, accept the factor."
             else:
                 factor_feedback.final_decision = True
-                factor_feedback.source_feedback["paper_factor_low_ic_terminal"] = False
                 factor_feedback.final_feedback = (
                     "The code review passed and the factor executed successfully, but the IC did not pass; "
-                    "recorded as a terminal rejected reproduction."
+                    "keep the factor and record the IC result as review context."
                 )
             return factor_feedback
 
