@@ -534,3 +534,31 @@ def init_workspace(
     }
     logger.info("Workspace initialization finished.")
     return summary
+
+
+def validate_workspace_ready(*, require_factor_data: bool = True) -> dict[str, list[str] | str]:
+    created_dirs = [str(path) for path in _ensure_workspace_dirs()]
+    env_message = _ensure_env_file(force=False)
+
+    data_messages: list[str] = []
+    if require_factor_data:
+        checks = [
+            (FACTOR_DATA_DIR / "daily_pv.h5", _is_valid_daily_factor_file),
+            (FACTOR_DATA_DIR / "minute_pv.h5", lambda path: path.exists()),
+            (FACTOR_DATA_DEBUG_DIR / "daily_pv.h5", _is_valid_daily_factor_file),
+            (FACTOR_DATA_DEBUG_DIR / "minute_pv.h5", lambda path: path.exists()),
+        ]
+        missing = [str(path) for path, checker in checks if not checker(path)]
+        if missing:
+            raise RuntimeError(
+                "Factor source data is not ready. Missing or invalid files:\n"
+                + "\n".join(f"- {path}" for path in missing)
+                + "\nRun `rdagent init --force` first."
+            )
+        data_messages.append("Using existing local factor source data.")
+
+    return {
+        "created_dirs": created_dirs,
+        "env": env_message,
+        "data": data_messages,
+    }

@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import site
 import subprocess
 import textwrap
 import uuid
@@ -11,6 +12,7 @@ from pathlib import Path
 from typing import Any, Tuple, Union
 
 import pandas as pd
+import docker  # type: ignore[import-untyped]
 from filelock import FileLock
 
 from rdagent.app.kaggle.conf import KAGGLE_IMPLEMENT_SETTING
@@ -21,6 +23,7 @@ from rdagent.core.experiment import Experiment, FBWorkspace
 from rdagent.core.utils import cache_with_pickle
 from rdagent.oai.llm_utils import md5_hash
 from rdagent.scenarios.qlib.developer.factor_dashboard import refresh_factor_dashboard
+from rdagent.utils.env import DockerConf, DockerEnv
 
 
 class FactorTask(CoSTEERTask):
@@ -78,6 +81,43 @@ variables: {str(self.variables)}"""
 
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__}[{self.factor_name}]>"
+
+
+class FactorDockerConf(DockerConf):
+    build_from_dockerfile: bool = True
+    dockerfile_folder_path: Path = Path(__file__).parent / "docker"
+    image: str = FACTOR_COSTEER_SETTINGS.docker_image
+    mount_path: str = "/workspace/factor_workspace"
+    default_entry: str = "python _rdagent_factor_launcher.py"
+    enable_cache: bool = False
+    shm_size: str | None = "16g"
+    mem_limit: str | None = "48g"
+    save_logs_to_file: bool = True
+    terminal_tail_lines: int = 20
+
+
+class FactorDockerEnv(DockerEnv):
+    def __init__(self, conf: DockerConf | None = None):
+        super().__init__(conf or FactorDockerConf())
+
+
+def _conda_env_exists(env_name: str) -> bool:
+    result = subprocess.run(
+        f"conda env list | grep -q '^{env_name} '",
+        shell=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    return result.returncode == 0
+
+
+def _docker_daemon_available() -> bool:
+    try:
+        client = docker.from_env()
+        client.ping()
+        return True
+    except Exception:
+        return False
 
 
 class FactorFBWorkspace(FBWorkspace):
@@ -402,8 +442,8 @@ class FactorFBWorkspace(FBWorkspace):
 
     @classmethod
     def _build_shared_data_launcher(cls, source_data_path: Path, code_path: Path) -> str:
-        source_data_path = source_data_path.resolve()
-        code_path = code_path.resolve()
+        source_data_path = source_data_path.resolve() if source_data_path.is_absolute() else source_data_path
+        code_path = code_path.resolve() if code_path.is_absolute() else code_path
         return textwrap.dedent(
             f"""
             import builtins
@@ -455,6 +495,80 @@ class FactorFBWorkspace(FBWorkspace):
             """
         ).strip() + "\n"
 
+    @staticmethod
+    def _resolve_execution_backend() -> str:
+        backend = str(FACTOR_COSTEER_SETTINGS.execution_backend).strip().lower()
+        if backend != "auto":
+            return backend
+        if _docker_daemon_available():
+            return "docker"
+        if _conda_env_exists(FACTOR_COSTEER_SETTINGS.execution_conda_env_name):
+            return "conda"
+        return "local"
+
+    @staticmethod
+    def _python_command_for_backend() -> str:
+        backend = FactorFBWorkspace._resolve_execution_backend()
+        if backend == "conda":
+            env_name = FACTOR_COSTEER_SETTINGS.execution_conda_env_name
+            return f"conda run -n {env_name} python"
+        return FACTOR_COSTEER_SETTINGS.python_bin
+
+    @staticmethod
+    def _sanitize_execution_feedback(raw_feedback: str, execution_code_path: Path) -> str:
+        feedback = (
+            raw_feedback.replace(str(execution_code_path.parent.absolute()), r"/path/to")
+            .replace(str(site.getsitepackages()[0]), r"/path/to/site-packages")
+        )
+        if len(feedback) > 2000:
+            feedback = feedback[:1000] + "....hidden long error message...." + feedback[-1000:]
+        return feedback
+
+    def _execute_locally(
+        self,
+        execution_code_path: Path,
+        source_data_path: Path,
+    ) -> tuple[bool, str]:
+        command = f"{self._python_command_for_backend()} {execution_code_path.name}"
+        completed = subprocess.run(
+            command,
+            shell=True,
+            cwd=self.workspace_path,
+            env={
+                **os.environ,
+                "FACTOR_DATA_DIR": str(source_data_path.resolve()),
+                "RDAGENT_FACTOR_DATA_DIR": str(source_data_path.resolve()),
+            },
+            stderr=subprocess.STDOUT,
+            stdout=subprocess.PIPE,
+            text=True,
+            timeout=FACTOR_COSTEER_SETTINGS.file_based_execution_timeout,
+        )
+        return completed.returncode == 0, self._sanitize_execution_feedback(completed.stdout or "", execution_code_path)
+
+    def _execute_in_docker(
+        self,
+        execution_code_path: Path,
+        source_data_path: Path,
+    ) -> tuple[bool, str]:
+        docker_env = FactorDockerEnv()
+        docker_env.prepare()
+        result = docker_env.run(
+            local_path=str(self.workspace_path),
+            entry=f"python {execution_code_path.name}",
+            env={
+                "FACTOR_DATA_DIR": "/workspace/factor_data",
+                "RDAGENT_FACTOR_DATA_DIR": "/workspace/factor_data",
+            },
+            running_extra_volume={
+                str(source_data_path.resolve()): {
+                    "bind": "/workspace/factor_data",
+                    "mode": "ro",
+                }
+            },
+        )
+        return result.exit_code == 0, self._sanitize_execution_feedback(result.full_stdout or "", execution_code_path)
+
     @cache_with_pickle(hash_func)
     def execute(self, data_type: str = "Debug") -> Tuple[str, pd.DataFrame]:
         """
@@ -482,6 +596,7 @@ class FactorFBWorkspace(FBWorkspace):
             else:
                 return self.FB_CODE_NOT_SET, None
         with FileLock(self.workspace_path / "execution.lock"):
+            backend = self._resolve_execution_backend()
             if self.target_task.version == 1:
                 source_data_path = (
                     Path(
@@ -504,9 +619,17 @@ class FactorFBWorkspace(FBWorkspace):
             execution_error = None
 
             if self.target_task.version == 1:
+                launcher_data_path = source_data_path.resolve()
+                launcher_code_path = code_path
+                if backend == "docker":
+                    launcher_data_path = Path("/workspace/factor_data")
+                    launcher_code_path = Path("factor.py")
                 execution_code_path = self.workspace_path / self.EXECUTION_LAUNCHER
                 execution_code_path.write_text(
-                    self._build_shared_data_launcher(source_data_path=source_data_path, code_path=code_path),
+                    self._build_shared_data_launcher(
+                        source_data_path=launcher_data_path,
+                        code_path=launcher_code_path,
+                    ),
                     encoding="utf-8",
                 )
             elif self.target_task.version == 2:
@@ -514,41 +637,38 @@ class FactorFBWorkspace(FBWorkspace):
                 execution_code_path.write_text((Path(__file__).parent / "factor_execution_template.txt").read_text())
 
             try:
-                subprocess.check_output(
-                    f"{FACTOR_COSTEER_SETTINGS.python_bin} {execution_code_path}",
-                    shell=True,
-                    cwd=self.workspace_path,
-                    env={
-                        **os.environ,
-                        "FACTOR_DATA_DIR": str(source_data_path.resolve()),
-                        "RDAGENT_FACTOR_DATA_DIR": str(source_data_path.resolve()),
-                    },
-                    stderr=subprocess.STDOUT,
-                    timeout=FACTOR_COSTEER_SETTINGS.file_based_execution_timeout,
-                )
-                execution_success = True
-            except subprocess.CalledProcessError as e:
-                import site
-
-                execution_feedback = (
-                    e.output.decode()
-                    .replace(str(execution_code_path.parent.absolute()), r"/path/to")
-                    .replace(str(site.getsitepackages()[0]), r"/path/to/site-packages")
-                )
-                if len(execution_feedback) > 2000:
-                    execution_feedback = (
-                        execution_feedback[:1000] + "....hidden long error message...." + execution_feedback[-1000:]
+                if backend == "docker":
+                    execution_success, execution_feedback = self._execute_in_docker(
+                        execution_code_path=execution_code_path,
+                        source_data_path=source_data_path,
                     )
-                if self.raise_exception:
-                    raise CustomRuntimeError(execution_feedback)
+                elif backend in {"local", "conda"}:
+                    execution_success, execution_feedback = self._execute_locally(
+                        execution_code_path=execution_code_path,
+                        source_data_path=source_data_path,
+                    )
                 else:
+                    raise RuntimeError(f"Unsupported factor execution backend: {backend}")
+
+                if not execution_success:
+                    if self.raise_exception:
+                        raise CustomRuntimeError(execution_feedback)
                     execution_error = CustomRuntimeError(execution_feedback)
             except subprocess.TimeoutExpired:
-                execution_feedback += f"Execution timeout error and the timeout is set to {FACTOR_COSTEER_SETTINGS.file_based_execution_timeout} seconds."
+                execution_feedback += (
+                    f"Execution timeout error and the timeout is set to "
+                    f"{FACTOR_COSTEER_SETTINGS.file_based_execution_timeout} seconds."
+                )
                 if self.raise_exception:
                     raise CustomRuntimeError(execution_feedback)
-                else:
-                    execution_error = CustomRuntimeError(execution_feedback)
+                execution_error = CustomRuntimeError(execution_feedback)
+            except Exception as e:
+                if isinstance(e, CustomRuntimeError):
+                    raise
+                execution_feedback = str(e)
+                if self.raise_exception:
+                    raise CustomRuntimeError(execution_feedback) from e
+                execution_error = CustomRuntimeError(execution_feedback)
 
             workspace_output_file_path = self.workspace_path / "result.h5"
             if workspace_output_file_path.exists() and execution_success:

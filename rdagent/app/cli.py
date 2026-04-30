@@ -66,10 +66,15 @@ def _temporary_env(**updates):
                 os.environ[key] = value
 
 
-def _auto_init_workspace() -> None:
-    from rdagent.app.utils.init_workspace import init_workspace
+def _auto_init_workspace(*, download_missing: bool = True) -> None:
+    if download_missing:
+        from rdagent.app.utils.init_workspace import init_workspace
 
-    init_workspace(force=False)
+        init_workspace(force=False)
+    else:
+        from rdagent.app.utils.init_workspace import validate_workspace_ready
+
+        validate_workspace_ready(require_factor_data=True)
 
 
 def _is_local_port_open(host: str, port: int) -> bool:
@@ -271,7 +276,7 @@ def fin_mine_factors_cli(
     ):
     from rdagent.app.qlib_rd_loop.research import mine_factors as fin_mine_factors
 
-    _auto_init_workspace()
+    _auto_init_workspace(download_missing=False)
     fin_mine_factors(
         path=path,
         step_n=step_n,
@@ -296,7 +301,7 @@ def daily_factor_cli(
     """Mine factors from daily data with the simplest default path."""
     from rdagent.app.qlib_rd_loop.research import mine_factors as fin_mine_factors
 
-    _auto_init_workspace()
+    _auto_init_workspace(download_missing=False)
     with _temporary_env(RDAGENT_FACTOR_DATA_MODE="daily"):
         fin_mine_factors(
             path=path,
@@ -620,7 +625,7 @@ def paper_factor_cli(
         help="Only read report and extract factor info without coding/evaluation/export.",
     ),
 ):
-    _auto_init_workspace()
+    _auto_init_workspace(download_missing=False)
     normalized_report_file = str(Path(report_file).resolve()) if report_file else None
 
     with _temporary_env(

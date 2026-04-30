@@ -196,23 +196,49 @@ class FactorMultiProcessEvolvingStrategy(MultiProcessEvolvingStrategy):
                 ).build_messages_and_create_chat_completion(
                     user_prompt=user_prompt,
                     system_prompt=system_prompt,
-                    json_mode=True,
-                    json_target_type=Dict[str, str],
+                    # Do not force backend-level JSON parsing here.
+                    # DeepSeek frequently returns valid code with non-standard JSON wrappers,
+                    # and strict json_mode may fail before our local fallbacks can run.
+                    json_mode=False,
                 )
 
                 try:
                     code = json.loads(response)["code"]
                 except json.decoder.JSONDecodeError:
-                    # extract python code block
-                    match = re.search(r"```python(.*?)```", response, re.DOTALL)
+                    # Fallback 1: extract python code block
+                    match = re.search(r"```python(.*?)```", response, re.DOTALL | re.IGNORECASE)
                     if match:
                         code = match.group(1).strip()
                     else:
-                        raise  # continue to retry
+                        # Fallback 2: extract any fenced code block
+                        generic_match = re.search(r"```(?:[a-zA-Z0-9_+-]*)?\n(.*?)```", response, re.DOTALL)
+                        if generic_match:
+                            code = generic_match.group(1).strip()
+                        else:
+                            # Fallback 3: treat the whole response as code if it strongly looks like Python
+                            compact = response.strip()
+                            looks_like_python = any(
+                                token in compact
+                                for token in (
+                                    "import pandas",
+                                    "import numpy",
+                                    "import torch",
+                                    "from pathlib import Path",
+                                    "def calculate_",
+                                    "to_hdf(",
+                                )
+                            )
+                            if looks_like_python:
+                                code = compact
+                            else:
+                                raise  # continue to retry
+
+                if not isinstance(code, str) or not code.strip():
+                    raise ValueError("Empty code extracted from model response.")
 
                 return code
 
-            except (json.decoder.JSONDecodeError, KeyError):
+            except (json.decoder.JSONDecodeError, KeyError, ValueError):
                 pass
         else:
             return ""  # return empty code if failed to get code after 10 attempts

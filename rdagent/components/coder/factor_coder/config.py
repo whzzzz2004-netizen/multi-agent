@@ -28,6 +28,15 @@ class FactorCoSTEERSettings(CoSTEERSettings):
     python_bin: str = "python"
     """Path to the Python binary"""
 
+    execution_backend: str = "auto"
+    """Execution backend for factor code: auto/local/conda/docker"""
+
+    execution_conda_env_name: str = "torch-pip"
+    """Dedicated conda env used when execution_backend is conda or auto falls back to conda."""
+
+    docker_image: str = "local_factor_exec:latest"
+    """Docker image used when execution_backend is docker."""
+
     min_abs_ic: float = 0.005
     """Minimum absolute cross-sectional IC required for a factor to be accepted into the pool"""
 
