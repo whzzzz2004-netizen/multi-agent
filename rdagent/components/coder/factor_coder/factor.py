@@ -100,6 +100,22 @@ class FactorDockerEnv(DockerEnv):
     def __init__(self, conf: DockerConf | None = None):
         super().__init__(conf or FactorDockerConf())
 
+    def prepare(self, *args, **kwargs) -> None:  # type: ignore[no-untyped-def]
+        force_build = os.environ.get("FACTOR_CoSTEER_FORCE_DOCKER_BUILD", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "y",
+            "on",
+        }
+        if not force_build:
+            try:
+                docker.from_env().images.get(self.conf.image)
+                return
+            except docker.errors.ImageNotFound:
+                pass
+        super().prepare(*args, **kwargs)
+
 
 def _conda_env_exists(env_name: str) -> bool:
     result = subprocess.run(

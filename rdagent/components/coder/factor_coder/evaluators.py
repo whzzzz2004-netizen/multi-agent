@@ -60,15 +60,6 @@ class FactorEvaluatorForCoder(CoSTEEREvaluator):
             )
         else:
             factor_feedback = FactorSingleFeedback()
-            code_feedback, _ = self.code_evaluator.evaluate(
-                target_task=target_task,
-                implementation=implementation,
-                execution_feedback="No execution was run yet; review the code against the factor definition.",
-                value_feedback="No value evaluation has been run yet.",
-                gt_implementation=gt_implementation,
-            )
-            factor_feedback.code_feedback = code_feedback
-            # 2. Run the code only after the code review passes.
             (
                 execution_feedback,
                 gen_df,
@@ -81,12 +72,21 @@ class FactorEvaluatorForCoder(CoSTEEREvaluator):
             factor_feedback.final_decision_based_on_gt = gt_implementation is not None
 
             if gen_df is None:
+                code_feedback, _ = self.code_evaluator.evaluate(
+                    target_task=target_task,
+                    implementation=implementation,
+                    execution_feedback=factor_feedback.execution_feedback,
+                    value_feedback="No factor value generated, skip value evaluation.",
+                    gt_implementation=gt_implementation,
+                )
+                factor_feedback.code_feedback = code_feedback
                 factor_feedback.value_feedback = "No factor value generated, skip value evaluation."
                 factor_feedback.value_generated_flag = False
                 factor_feedback.final_decision = False
                 factor_feedback.final_feedback = "Execution failed, rewrite the code."
                 return factor_feedback
 
+            factor_feedback.code_feedback = "Code review skipped because factor execution produced output successfully."
             factor_feedback.value_generated_flag = True
             (
                 factor_feedback.value_feedback,
@@ -101,7 +101,7 @@ class FactorEvaluatorForCoder(CoSTEEREvaluator):
             else:
                 factor_feedback.final_decision = True
                 factor_feedback.final_feedback = (
-                    "The code review passed and the factor executed successfully, but the IC did not pass; "
+                    "The factor executed successfully, but the IC did not pass; "
                     "keep the factor and record the IC result as review context."
                 )
             return factor_feedback

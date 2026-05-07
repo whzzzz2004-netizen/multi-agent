@@ -28,8 +28,8 @@ class FactorCoSTEERSettings(CoSTEERSettings):
     python_bin: str = "python"
     """Path to the Python binary"""
 
-    execution_backend: str = "auto"
-    """Execution backend for factor code: auto/local/conda/docker"""
+    execution_backend: str = "conda"
+    """Execution backend for factor code: conda/docker/local/auto"""
 
     execution_conda_env_name: str = "torch-pip"
     """Dedicated conda env used when execution_backend is conda or auto falls back to conda."""

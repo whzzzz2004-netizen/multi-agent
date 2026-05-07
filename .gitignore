@@ -187,4 +187,10 @@ static/
 AGENTS.md
 !rdagent/**/AGENTS.md
 
-scripts/
+scripts/*
+!scripts/install_factor_docker_image.sh
+!scripts/README_paper_factor_docker.md
+
+# Docker image release archives should be uploaded to GitHub Releases, not Git.
+release_assets/*.tar
+release_assets/*.tar.gz

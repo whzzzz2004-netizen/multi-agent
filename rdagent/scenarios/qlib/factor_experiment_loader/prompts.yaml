@@ -1,25 +1,32 @@
-extract_factors_system: |-
-    用户会提供一篇金融工程研报。在当前任务里，这篇文章的作用就是提供可复现的因子。
-    请把注意力集中在文章重点提出、重点讨论、最能代表本文贡献的因子上，不要把模型、训练框架、实验设置、回测流程当作抽取重点。
-    请按照要求抽取以下信息:
-    1. 概述这篇研报的主要研究思路;
-    2. 只抽取这篇研报新提出或重点研究的代表性因子，并概述因子的计算过程。不要抽取只用于对比、回顾、控制变量或基线测试的已有因子。最多返回 10 个因子；如果候选因子超过 10 个，请按论文强调程度、公式清晰度和可复现性选择最重要的 10 个。因子的名称请使用英文，不能包含空格，可用下划线连接。若没有，请返回空字典;
-
-    user will treat your factor name as key to store the factor, don't put any interaction message in the content. Just response the output without any interaction and explanation.
-    All names should be in English.
-    Respond with your analysis in JSON format. The JSON schema should include:
-    {
-        "summary": "The summary of this report",
-        "factors": {
-            "Name of factor 1": "Description to factor 1",
-            "Name of factor 2": "Description to factor 2"
-        }
-    }
 
 extract_core_factors_system: |-
-    用户会提供一篇金融工程研报。在当前任务里，这篇文章的作用就是提供可复现的因子。
-    请只总结这篇论文重点提出、重点讨论、最能代表本文贡献的核心因子。不要抽取只用于对比、回顾、控制变量或基线测试的已有因子。
-    最多返回 10 个因子；如果候选因子超过 10 个，请按论文强调程度、公式清晰度和可复现性选择最重要的 10 个。请一次性直接给出因子描述、公式和变量说明，避免遗漏和重复。
+    用户会提供一篇金融工程研报。在当前任务里，这篇文章的作用是提供可复现的 alpha 因子。
+    请先按“挖因子”的标准抽取论文明确提出、检验或用于选股评分的 alpha 变量，而不是先拆交易流程。事件条件和策略规则只能作为因子定义的上下文补充。
+    最多返回 10 个因子；如果候选超过 10 个，请按“是否是 alpha 变量、是否直接参与选股评分、公式清晰度、论文强调程度、可复现性”选择最重要的 10 个。请一次性直接给出描述、公式和变量说明，避免遗漏和重复。
+    即使某个因子依赖本地暂时没有的数据，也要先抽取出来，并在 description 或 variables 中标明所需数据；不要因为可能不可实现就在抽取阶段漏掉。后续流程会负责跳过缺数据的因子。
+
+    对每个因子任务，请尽可能完整、可复现地描述因子的生成逻辑，而不仅仅摘录公式表面形式。目标是让研究者仅依赖本地行情数据、领域知识库和当前描述，就能明确知道该因子应如何计算。
+
+    【先挖因子】
+    1. 因子必须是可用于解释或预测股票未来收益、弹性、风险、流动性、拥挤度、情绪暴露或交易机会的变量。它可以是连续数值、离散评分、排名分位、比率、强度、位置、状态编码或模型输出。
+    2. 优先抽取论文中有公式、打分表、变量说明、实证检验、分组测试、IC/收益分析或明确进入综合评分体系的变量。可以抽取策略中的子因子，例如量比、回调幅度、收盘位置、前期涨幅、均线排列、市值评分、行业热度、情绪阶段等；不要因为它们服务于同一策略而合并成一个大因子。
+    3. 不要把纯交易动作当作因子，例如“买入”“卖出”“次日开盘执行”“持有N天”；除非论文把仓位、止损阈值、情绪阶段等规则数值化为评分或状态变量，才可作为因子或风控因子抽取。
+
+    【通用可复现要求】
+    4. description 不应只是金融含义解释，还要说明实际生成步骤，包括变量含义、时间偏移、使用的输入字段、样本范围、数据过滤条件、中间状态或判定逻辑、缺失值或非满足条件样本的处理方式。
+    5. formulation、description、variables 中出现的变量，都要明确时间锚点、是否相对事件日定义、依赖的原始字段（例如 open/high/low/close/volume/amount）、具体计算口径和输出频率。
+    6. 因子任务应尽量自包含，不依赖“前一个因子已经计算完成”的隐含前提。若引用其他中间结果，需要展开其生成逻辑；如果无法展开，要明确缺少什么定义或数据。
+    7. 不要将未定义的中间概念直接视为已有字段，例如市场情绪、情绪周期、回调确认、放量区间、龙头股、强势板块等。若被用于因子定义，需要说明判定规则；若论文未提供且本地数据或知识库无法推出，需要明确指出缺少哪些定义或数据。
+    8. 对 rolling/window/groupby/rank/标准化/分层统计等操作，要尽量说明窗口长度、聚合方式、排序方向、按股票/日期/行业等分组维度，以及是否做去极值、标准化、中性化等处理。
+    9. 如果因子包含阈值、分段、打分映射、状态判定、分位数边界、窗口长度等参数，必须给出具体数值或确定性公式。禁止写“合理设定”“自行设定”“参照图表但不给数值”“根据情况调整”。如果研报没有给出，请明确写缺少哪一个参数。
+
+    【事件驱动因子的额外要求，仅在适用时】
+    10. 若因子依赖涨停、炸板、首板、回调、放量、突破等事件或条件样本，需要额外说明事件如何由本地行情数据或知识库口径计算得到，而不是假设存在现成字段。
+    11. 明确事件日、观察窗口、回调阶段等条件时间锚点，例如 T-2 日（涨停日）、首板后次日、炸板当日、回调确认后的第 3 日等。formulation 中若文字描述包含条件过滤，应显式加入 indicator、mask 或条件集合。
+    12. 必须说明哪些样本属于有效样本，非事件样本如何处理（NaN、0、跳过等），多次事件冲突时如何选择事件锚点，variables 中也要写清事件判定规则、时间偏移、所需输入字段、是否需要历史窗口或未来确认。
+
+    【不完整定义的处理】
+    13. 如果论文定义不完整，或当前本地数据无法支持完整复现，不要擅自补全。应明确指出缺少哪些字段、缺少哪些规则、哪些部分只能近似实现、哪些逻辑存在歧义。避免生成看似合理但无法严格复现论文的因子实现。
 
     只使用 JSON 返回，不要输出任何解释文字。所有因子名称使用英文，下划线连接，不能包含空格。
     如果论文没有明确提出可复现的新因子，就返回空字典。
@@ -42,30 +49,23 @@ extract_core_factors_system: |-
 extract_core_factors_user: |-
     {{ report_content }}
 
-extract_factors_follow_user: |-
-    Please continue extracting only the paper's newly proposed factors. Ignore factors already shown in former messages. Do not extract baseline or comparison factors. If no new factor is found, return an empty dict.
-    Respond with your analysis in JSON format. The JSON schema should include:
-    {
-        "factors": {
-            "Name of factor 1": "Description to factor 1",
-            "Name of factor 2": "Description to factor 2"
-        }
-    }
-
 extract_factor_formulation_system: |-
     I have a financial engineering research report and a list of factors extracted from it. These factors should be the paper's newly proposed factors, not baseline comparison factors. I need assistance in extracting specific information based on the report and the provided list of factors. The tasks are as follows:
 
     1. For each factor, I need its calculation formula in LaTeX format. The variable names within the formulas should not contain spaces; instead, use underscores to connect words. Ensure that the factor names within the formulas are consistent with the ones I've provided.
-    2. For each factor formula, provide explanations for the variables and functions used. The explanations should be in English, and the variable and function names should match those used in the formulas.
+    2. For each factor formula, provide explanations for the variables and functions used. The explanations should preserve the full meaning from the report, including time offsets, event anchors, sample filters, and conditional event days. The variable and function names should match those used in the formulas.
+    3. Treat phrases inside parentheses as part of the variable definition. For example, if a variable is described as "T-2 day (limit-up day) volume", then T-2 must be a limit-up event day; it is not a plain T-2 volume.
+    4. If the report defines a factor on event samples, add the event condition or indicator to the formulation so that downstream code can reproduce the factor without dropping the condition.
+    5. Each factor must be self-contained in timing, sample filters, and required inputs. Do not leave undefined intermediate concepts such as Stage_t_raw, Stage_smooth, PullbackDay, FirstBoardDay, or market sentiment as if they were available columns. If the report defines the concept, preserve that definition. If the report does not define it, clearly mark the missing definition and do not invent a new rule in the formulation extraction stage.
 
-    Here are the sources of data I have:
+    Here are the ONLY local data sources available for reproduction:
 
-    1. Stock Trade Data Table: Contains information on stock trades, including daily open, close, high, low, VWAP prices, volume, and turnover.
-    2. Financial Data Table: Contains company financial statements, such as the balance sheet, income statement, and cash flow statement.
-    3. Stock Fundamental Data Table: Contains basic information about stocks, like total shares outstanding, free float shares, industry classification, market classification, etc.
-    4. High-Frequency Data: Contains price and volume of each stock at the minute level, including open, close, high, low, volume, and VWAP.
+    1. Daily price-volume data: daily open, high, low, close, volume, amount, average/VWAP-like price, paused status, turnover rate, and turnover if these fields are explicitly present in the local schema.
+    2. Minute bar data: minute open, high, low, close, volume, amount, factor, VWAP, and paused status if these fields are explicitly present in the local schema.
 
-    Please expand the formulation to use the source data I have provided. If the number of factors exceeds the token limit, extract the formulas for as many factors as possible without exceeding the limit. Ensure to avoid syntax errors related to special characters in JSON, especially with backslashes and underscores in LaTeX.
+    The user does NOT have financial statements, balance sheet, income statement, cash flow statement, company fundamentals, market capitalization, total shares, free-float shares, industry classification, market classification, analyst forecasts, order-book quotes, tick-by-tick trades, news, text, macro, or any hidden tables unless those fields are explicitly listed later in the local schema.
+
+    Please expand the formulation using only the available daily/minute price-volume data. If a factor requires unavailable data or an undefined intermediate concept, preserve the paper's formula but clearly mark the required variable as unavailable in the variable explanation and state that the factor should be skipped rather than approximated with unrelated price-volume proxies. If the number of factors exceeds the token limit, extract the formulas for as many factors as possible without exceeding the limit. Ensure to avoid syntax errors related to special characters in JSON, especially with backslashes and underscores in LaTeX.
 
     Provide your analysis in JSON format, using the following schema:
     {

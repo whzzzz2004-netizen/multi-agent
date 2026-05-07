@@ -169,6 +169,35 @@ class FactorSingleColumnEvaluator(FactorEvaluator):
             )
 
 
+class FactorNumericValueEvaluator(FactorEvaluator):
+    def evaluate(
+        self,
+        implementation: Workspace,
+        gt_implementation: Workspace,
+    ) -> Tuple[str, object]:
+        _, gen_df = self._get_df(gt_implementation, implementation)
+        if gen_df is None:
+            return "The source dataframe is None. Please check the implementation.", False
+        if gen_df.shape[1] == 0:
+            return "The source dataframe has no factor column.", False
+
+        factor = gen_df.iloc[:, 0]
+        non_null_count = int(factor.notna().sum())
+        if non_null_count == 0:
+            return "The factor column has no non-null values; numeric dtype check is skipped.", True
+
+        numeric_factor = pd.to_numeric(factor, errors="coerce")
+        invalid_count = int(factor.notna().sum() - numeric_factor.notna().sum())
+        if invalid_count == 0:
+            return "The factor column is numeric or can be safely converted to numeric values.", True
+        return (
+            "The factor column contains non-numeric values. Factor outputs must be numeric; "
+            f"found {invalid_count} non-null value(s) that cannot be converted to numeric. "
+            "Categorical stages must be encoded as numbers before saving.",
+            False,
+        )
+
+
 class FactorOutputFormatEvaluator(FactorEvaluator):
     @staticmethod
     def _paper_fast_enabled() -> bool:
@@ -577,6 +606,11 @@ class FactorValueEvaluator(FactorEvaluator):
                     "Output dataframe has more columns than input feature which is not acceptable in feature processing tasks. Please check the implementation to avoid generating too many columns. Consider this implementation as a failure."
                 )
 
+        feedback_str, numeric_check_result = FactorNumericValueEvaluator(self.scen).evaluate(
+            implementation, gt_implementation
+        )
+        conclusions.append(feedback_str)
+
         feedback_str, inf_evaluate_res = FactorInfEvaluator(self.scen).evaluate(implementation, gt_implementation)
         conclusions.append(feedback_str)
 
@@ -643,6 +677,7 @@ class FactorValueEvaluator(FactorEvaluator):
             and row_result <= 0.99
             or output_format_result is False
             or daily_check_result is False
+            or numeric_check_result is False
             or inf_evaluate_res is False
             or leakage_check_result is False
             or ic_check_result is False

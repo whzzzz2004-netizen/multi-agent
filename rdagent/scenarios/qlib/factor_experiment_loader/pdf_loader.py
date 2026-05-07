@@ -122,32 +122,6 @@ def classify_report_from_dict(
     return res_dict
 
 
-def __extract_factors_name_and_desc_from_content(
-    content: str,
-) -> dict[str, dict[str, str]]:
-    session = APIBackend().build_chat_session(
-        session_system_prompt=T(".prompts:extract_factors_system").r(),
-    )
-
-    extracted_factor_dict = {}
-    current_user_prompt = content
-
-    for _ in range(10):
-        extract_result_resp = session.build_chat_completion(
-            user_prompt=current_user_prompt,
-            json_mode=True,
-        )
-        ret_dict = json.loads(extract_result_resp)
-        factors = ret_dict["factors"]
-        if len(factors) == 0:
-            break
-        for factor_name, factor_description in factors.items():
-            extracted_factor_dict[factor_name] = factor_description
-        current_user_prompt = T(".prompts:extract_factors_follow_user").r()
-
-    return extracted_factor_dict
-
-
 def __extract_core_factors_from_content(
     content: str,
 ) -> dict[str, dict[str, dict[str, str] | str]]:
@@ -158,84 +132,6 @@ def __extract_core_factors_from_content(
     )
     result = json.loads(response)
     return result if isinstance(result, dict) else {"summary": "", "factors": {}}
-
-
-def __extract_factors_formulation_from_content(
-    content: str,
-    factor_dict: dict[str, str],
-) -> dict[str, dict[str, str]]:
-    factor_dict_df = pd.DataFrame(
-        factor_dict.items(),
-        columns=["factor_name", "factor_description"],
-    )
-
-    system_prompt = T(".prompts:extract_factor_formulation_system").r()
-    current_user_prompt = T(".prompts:extract_factor_formulation_user").r(
-        report_content=content,
-        factor_dict=factor_dict_df.to_string(),
-    )
-
-    session = APIBackend().build_chat_session(session_system_prompt=system_prompt)
-    factor_to_formulation = {}
-
-    for _ in range(10):
-        extract_result_resp = session.build_chat_completion(
-            user_prompt=current_user_prompt,
-            json_mode=True,
-        )
-        ret_dict = json.loads(extract_result_resp)
-        for name, formulation_and_description in ret_dict.items():
-            if name in factor_dict:
-                factor_to_formulation[name] = formulation_and_description
-        if len(factor_to_formulation) != len(factor_dict):
-            remain_df = factor_dict_df[~factor_dict_df["factor_name"].isin(factor_to_formulation)]
-            current_user_prompt = (
-                "Some factors are missing. Please check the following"
-                " factors and their descriptions and continue extraction.\n"
-                "==========================Remaining factors"
-                "==========================\n" + remain_df.to_string()
-            )
-        else:
-            break
-
-    return factor_to_formulation
-
-
-def __extract_factor_and_formulation_from_one_report(
-    content: str,
-) -> dict[str, dict[str, str]]:
-    final_factor_dict_to_one_report = {}
-    factor_dict = __extract_factors_name_and_desc_from_content(content)
-    if len(factor_dict) != 0:
-        factor_to_formulation = __extract_factors_formulation_from_content(
-            content,
-            factor_dict,
-        )
-    for factor_name in factor_dict:
-        if (
-            factor_name not in factor_to_formulation
-            or "formulation" not in factor_to_formulation[factor_name]
-            or "variables" not in factor_to_formulation[factor_name]
-        ):
-            continue
-
-        final_factor_dict_to_one_report.setdefault(factor_name, {})
-        final_factor_dict_to_one_report[factor_name]["description"] = factor_dict[factor_name]
-
-        # use code to correct _ in formulation
-        formulation = factor_to_formulation[factor_name]["formulation"]
-        if factor_name in formulation:
-            target_factor_name = factor_name.replace("_", r"\_")
-            formulation = formulation.replace(factor_name, target_factor_name)
-        for variable in factor_to_formulation[factor_name]["variables"]:
-            if variable in formulation:
-                target_variable = variable.replace("_", r"\_")
-                formulation = formulation.replace(variable, target_variable)
-
-        final_factor_dict_to_one_report[factor_name]["formulation"] = formulation
-        final_factor_dict_to_one_report[factor_name]["variables"] = factor_to_formulation[factor_name]["variables"]
-
-    return final_factor_dict_to_one_report
 
 
 def __extract_core_factor_dict_from_one_report(
@@ -300,25 +196,15 @@ def extract_factors_from_report_dict(
     final_report_factor_dict = {}
     factor_dict_list = multiprocessing_wrapper(
         [
-            (
-                __extract_core_factor_dict_from_one_report if single_pass else __extract_factor_and_formulation_from_one_report,
-                (useful_report_dict[file_name],),
-            )
+            (__extract_core_factor_dict_from_one_report, (useful_report_dict[file_name],))
             for file_name in file_name_list
         ],
         n=RD_AGENT_SETTINGS.multi_proc_n,
     )
     for index, file_name in enumerate(file_name_list):
         extracted_factors = factor_dict_list[index]
-        # Single-pass extraction is faster/cheaper but can return an empty dict when
-        # model output slightly deviates from strict schema. Fall back to the legacy
-        # two-stage extraction for this report to keep throughput stable.
         if single_pass and not extracted_factors:
-            logger.warning(
-                f"Single-pass extraction returned empty factors for {file_name}. "
-                "Falling back to two-stage extraction."
-            )
-            extracted_factors = __extract_factor_and_formulation_from_one_report(useful_report_dict[file_name])
+            logger.warning(f"Single-pass extraction returned empty factors for {file_name}.")
         final_report_factor_dict[file_name] = extracted_factors
     logger.info(f"Factor extraction completed for {len(final_report_factor_dict)} reports")
 

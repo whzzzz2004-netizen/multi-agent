@@ -126,6 +126,45 @@ class FactorMultiProcessEvolvingStrategy(MultiProcessEvolvingStrategy):
         workspace: FBWorkspace | None = None,
         prev_task_feedback: CoSTEERSingleFeedback | None = None,
     ) -> str:
+        def _extract_code(candidate: str) -> str:
+            candidate = candidate.strip()
+            if not candidate:
+                raise ValueError("Empty model response.")
+
+            try:
+                parsed = json.loads(candidate)
+            except json.JSONDecodeError:
+                parsed = None
+
+            if isinstance(parsed, dict):
+                code_value = parsed.get("code")
+                if isinstance(code_value, str) and code_value.strip():
+                    return code_value
+
+            match = re.search(r"```python(.*?)```", candidate, re.DOTALL | re.IGNORECASE)
+            if match:
+                return _extract_code(match.group(1))
+
+            generic_match = re.search(r"```(?:[a-zA-Z0-9_+-]*)?\n(.*?)```", candidate, re.DOTALL)
+            if generic_match:
+                return _extract_code(generic_match.group(1))
+
+            looks_like_python = any(
+                token in candidate
+                for token in (
+                    "import pandas",
+                    "import numpy",
+                    "import torch",
+                    "from pathlib import Path",
+                    "def calculate_",
+                    "to_hdf(",
+                )
+            )
+            if looks_like_python:
+                return candidate
+
+            raise ValueError("Unable to extract executable Python code from model response.")
+
         target_factor_task_information = target_task.get_task_information()
 
         queried_similar_successful_knowledge = []
@@ -201,37 +240,7 @@ class FactorMultiProcessEvolvingStrategy(MultiProcessEvolvingStrategy):
                     # and strict json_mode may fail before our local fallbacks can run.
                     json_mode=False,
                 )
-
-                try:
-                    code = json.loads(response)["code"]
-                except json.decoder.JSONDecodeError:
-                    # Fallback 1: extract python code block
-                    match = re.search(r"```python(.*?)```", response, re.DOTALL | re.IGNORECASE)
-                    if match:
-                        code = match.group(1).strip()
-                    else:
-                        # Fallback 2: extract any fenced code block
-                        generic_match = re.search(r"```(?:[a-zA-Z0-9_+-]*)?\n(.*?)```", response, re.DOTALL)
-                        if generic_match:
-                            code = generic_match.group(1).strip()
-                        else:
-                            # Fallback 3: treat the whole response as code if it strongly looks like Python
-                            compact = response.strip()
-                            looks_like_python = any(
-                                token in compact
-                                for token in (
-                                    "import pandas",
-                                    "import numpy",
-                                    "import torch",
-                                    "from pathlib import Path",
-                                    "def calculate_",
-                                    "to_hdf(",
-                                )
-                            )
-                            if looks_like_python:
-                                code = compact
-                            else:
-                                raise  # continue to retry
+                code = _extract_code(response)
 
                 if not isinstance(code, str) or not code.strip():
                     raise ValueError("Empty code extracted from model response.")
