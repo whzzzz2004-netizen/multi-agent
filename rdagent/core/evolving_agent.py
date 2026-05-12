@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from abc import ABC, abstractmethod
 from collections.abc import Generator
 from contextlib import nullcontext
@@ -16,8 +17,9 @@ from rdagent.core.evolving_framework import (
     IterEvaluator,
     RAGStrategy,
 )
-from rdagent.core.exception import EvaluatorDidNotTerminateError
+from rdagent.core.exception import EnvironmentDependencyError, EvaluatorDidNotTerminateError
 from rdagent.log import rdagent_logger as logger
+from rdagent.utils.execution_feedback import coosteer_multifeedback_all_environment_errors
 
 ASpecificEvaluator = TypeVar("ASpecificEvaluator", bound=Evaluator)
 ASpecificEvolvableSubjects = TypeVar("ASpecificEvolvableSubjects", bound=EvolvableSubjects)
@@ -182,6 +184,29 @@ class RAGEvoAgent(EvoAgent[RAGEvaluator, ASpecificEvolvableSubjects], Generic[AS
 
                 # 5. update trace
                 self.evolving_trace.append(es)
+
+                abort_env = os.environ.get("RDAGENT_COOSTEER_ABORT_ON_ENV_ERROR", "1").strip().lower() in (
+                    "1",
+                    "true",
+                    "yes",
+                    "on",
+                )
+                _finished_fn = getattr(es.feedback, "finished", None)
+                not_yet_finished = not (callable(_finished_fn) and _finished_fn())
+                if (
+                    abort_env
+                    and es.feedback is not None
+                    and not_yet_finished
+                    and coosteer_multifeedback_all_environment_errors(es.feedback)
+                ):
+                    logger.warning(
+                        "Halting CoSTEER evolution: execution feedback matches environment/dependency failure "
+                        "(e.g. Docker or pip). Set RDAGENT_COOSTEER_ABORT_ON_ENV_ERROR=0 to disable this early abort."
+                    )
+                    raise EnvironmentDependencyError(
+                        "Environment or dependency installation failure detected from execution feedback; "
+                        "aborting further CoSTEER loops."
+                    )
 
                 # 6. knowledge self-evolving
                 if self.knowledge_self_gen and self.rag is not None:

@@ -12,7 +12,7 @@ import pandas as pd
 from rdagent.app.qlib_rd_loop.conf import FACTOR_FROM_REPORT_PROP_SETTING
 from rdagent.app.qlib_rd_loop.factor import FactorRDLoop
 from rdagent.components.coder.factor_coder.config import FACTOR_COSTEER_SETTINGS
-from rdagent.components.coder.factor_coder.eva_utils import evaluate_factor_ic_from_workspace
+from rdagent.components.coder.factor_coder.eva_utils import evaluate_factor_metrics_bundle
 from rdagent.components.coder.factor_coder.evaluators import FactorSingleFeedback
 from rdagent.components.coder.factor_coder.factor import FactorExperiment, FactorFBWorkspace, FactorTask
 from rdagent.components.document_reader.document_reader import (
@@ -20,6 +20,7 @@ from rdagent.components.document_reader.document_reader import (
     load_and_process_pdfs_by_langchain,
 )
 from rdagent.core.conf import RD_AGENT_SETTINGS
+from rdagent.core.exception import EnvironmentDependencyError
 from rdagent.core.proposal import Hypothesis, HypothesisFeedback
 from rdagent.log import rdagent_logger as logger
 from rdagent.oai.llm_utils import APIBackend, md5_hash
@@ -27,6 +28,7 @@ from rdagent.scenarios.qlib.factor_experiment_loader.pdf_loader import (
     FactorExperimentLoaderFromPDFfiles,
 )
 from rdagent.utils.agent.tpl import T
+from rdagent.utils.manifest_csv import manifest_append_row
 from rdagent.utils.workflow import LoopMeta
 
 
@@ -176,6 +178,8 @@ def _record_rejected_report_factor(task, feedback, source_report_path: str | Non
         kept_lines = [
             f"# 跳过或失败的因子汇总：{source_report_title or Path(source_report_path).stem}",
             "",
+            "> 说明：本文件按时间追加各因子的跳过/失败原因。**若之后同一因子已成功导出**，请以同目录下的 `{因子名}.meta.json` / `.parquet` 为准；本表中的旧条目未必会删除。",
+            "",
         ]
     kept_lines.append(summary_line)
     summary_path.write_text("\n".join(kept_lines).rstrip() + "\n", encoding="utf-8")
@@ -217,7 +221,7 @@ def _record_rejected_report_factor(task, feedback, source_report_path: str | Non
             else False
         )
         manifest = manifest[~(same_factor & same_report)]
-        manifest = pd.concat([manifest, row], ignore_index=True)
+        manifest = manifest_append_row(manifest, row)
     else:
         manifest = row
     manifest.sort_values("factor_name").to_csv(manifest_path, index=False)
@@ -409,6 +413,16 @@ def _knowledge_section_aliases(title: str) -> list[str]:
             "首板回调",
             "首板后回调",
             "event anchor",
+        ],
+        "涨停类型与「未涨停」口径（复现时统一）": [
+            "未涨停",
+            "前一交易日未涨停",
+            "非涨停",
+            "一般涨停",
+            "换手涨停",
+            "涨停判定",
+            "limit up detection",
+            "not limit up",
         ],
         "本地数据使用纪律": [
             "基本面",
@@ -701,6 +715,19 @@ def _refine_factor_task_with_llm(task: FactorTask, data_profile: dict[str, Any],
     )
 
 
+def _paper_factor_schema_contract() -> str:
+    """Hard constraints appended to every adapted task to reduce silent column / proxy mismatches."""
+    return (
+        "\n\n【字段与涨停复现契约（代码级硬性）】\n"
+        "- 若日频数据中不存在 `closed_at_limit_up`、`limit_up_flag` 等现成布尔列，一律由前收盘价与涨跌幅限制推导涨停价，"
+        "再结合 OHLC 判定是否涨停；禁止依赖未在「可用日频字段」列表中出现的列名。\n"
+        "- 文中「未涨停」「前一日未涨停」「首板日前一日不是涨停」等表述，均指交易所涨跌停限价意义下的「当日未以涨停价收盘」，"
+        "不得用换手率、量比、成交额等无关量作为「是否涨停」的代理。\n"
+        "- 「一字板」「非一字板」仅使用可用的开高低收与涨停价近似；缺少分钟/盘口数据时不要编造封单、排队、炸板次数等。\n"
+        "- 首板日、回调确认日等事件锚点必须与上述涨停口径一致，同一研报内多因子不得混用多套定义。\n"
+    )
+
+
 def _adapt_report_task_for_available_data(task: FactorTask) -> FactorTask:
     data_profile = _load_local_factor_data_profile()
     domain_knowledge = _load_paper_factor_domain_knowledge(task)
@@ -751,6 +778,7 @@ def _adapt_report_task_for_available_data(task: FactorTask) -> FactorTask:
     "- 最终必须输出“日频因子 DataFrame”。\n"
     "- 不要因为本地数据规模小于论文设定而直接放弃实现。\n"
 )
+    adaptation_note += _paper_factor_schema_contract()
     if domain_knowledge:
         adaptation_note += f"\n\npaper_factor retrieved knowledge relevant to this factor:\n{domain_knowledge}"
     adapted_task.description = f"{adapted_task.factor_description}{adaptation_note}"
@@ -1075,7 +1103,31 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
             logger.info(f"paper_factor: skipped {task_name} before coding. {skip_reason}")
             print(f"paper_factor: skipped {task_name} ({skip_reason})", flush=True)
             return direct_exp
-        exp = self.coder.develop(direct_exp)
+        try:
+            exp = self.coder.develop(direct_exp)
+        except EnvironmentDependencyError as exc:
+            logger.warning("paper_factor: environment dependency error, stopping coder: %s", exc)
+            task = direct_exp.sub_tasks[0] if direct_exp.sub_tasks else None
+            task_name = getattr(task, "factor_name", "unknown")
+            msg = (
+                "ENVIRONMENT_ERROR: "
+                f"{exc}. "
+                "Fix Docker/pip/network or set RDAGENT_COOSTEER_ABORT_ON_ENV_ERROR=0 to retry full CoSTEER loops."
+            )
+            direct_exp.sub_workspace_list = [None]
+            direct_exp.prop_dev_feedback = [
+                FactorSingleFeedback(
+                    execution_feedback=msg,
+                    value_generated_flag=False,
+                    code_feedback="基础设施或依赖安装失败，继续让模型改代码通常无效。请检查运行环境后重试。",
+                    value_feedback="未生成因子值：环境/依赖安装阶段失败。",
+                    final_decision=False,
+                    final_feedback=msg,
+                    final_decision_based_on_gt=False,
+                )
+            ]
+            print(f"paper_factor: stopped {task_name} ({msg.splitlines()[0][:200]})", flush=True)
+            return direct_exp
         logger.log_object(exp.sub_workspace_list, tag="coder result")
         return exp
 
@@ -1133,6 +1185,9 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
                     if "DATA_UNAVAILABLE:" in feedback_text:
                         reason = feedback_text.split("DATA_UNAVAILABLE:", 1)[1].splitlines()[0].strip()
                         print(f"paper_factor: skipped {task.factor_name} (DATA_UNAVAILABLE: {reason})", flush=True)
+                    elif "ENVIRONMENT_ERROR:" in feedback_text:
+                        reason = feedback_text.split("ENVIRONMENT_ERROR:", 1)[1].splitlines()[0].strip()
+                        print(f"paper_factor: skipped {task.factor_name} (ENVIRONMENT_ERROR: {reason})", flush=True)
                     else:
                         print(f"paper_factor: rejected {task.factor_name} (实现检查未通过).", flush=True)
                     continue
@@ -1148,7 +1203,7 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
                     continue
                 if df is None or df.empty:
                     continue
-                ic_feedback, full_sample_ic = evaluate_factor_ic_from_workspace(
+                ic_feedback, full_sample_ic, eval_metrics = evaluate_factor_metrics_bundle(
                     workspace,
                     data_type="All",
                     gen_df=df,
@@ -1174,6 +1229,7 @@ class FactorReportLoop(FactorRDLoop, metaclass=LoopMeta):
                     tags=tags,
                     review_notes=review_notes,
                     ic_score=full_sample_ic,
+                    evaluation_metrics=eval_metrics,
                     source_type="literature_report",
                     source_report_path=source_report_path,
                     source_report_title=source_report_title,
@@ -1220,7 +1276,6 @@ def _infer_report_factor_registry_tags(task, feedback) -> list[str]:
             tags.add(tag)
     if "future-information leak" not in content and "time leakage" not in content:
         tags.add("leakage_checked")
-    tags.add("ic_passed")
     return sorted(tags)
 
 
