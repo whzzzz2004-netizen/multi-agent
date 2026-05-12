@@ -631,6 +631,7 @@ def paper_factor_cli(
     with _temporary_env(
         MAX_RETRY=str(llm_max_retry),
         LOG_LLM_CHAT_CONTENT="False",
+        LITELLM_ENABLE_RESPONSE_SCHEMA="false",
         QLIB_FACTOR_MAX_FACTORS_PER_EXP=str(max_factors_per_paper),
         RDAGENT_PAPER_FACTOR_SKIP_LOW_IC_REPAIR="1",
         RDAGENT_PAPER_FACTOR_FAST="1",
@@ -640,6 +641,13 @@ def paper_factor_cli(
             from rdagent.app.qlib_rd_loop.factor_from_report import main as fin_factor_report
             from rdagent.app.qlib_rd_loop.factor_from_report import list_unprocessed_report_paths
             from rdagent.app.qlib_rd_loop.paper_fetcher import sync_latest_factor_papers
+            from rdagent.app.qlib_rd_loop.paper_factor_preflight import verify_paper_factor_data_paths
+
+            if not extract_only:
+                ok, preflight_msg = verify_paper_factor_data_paths()
+                typer.echo(preflight_msg)
+                if not ok:
+                    raise typer.Exit(code=1)
         except ModuleNotFoundError as exc:
             missing_name = getattr(exc, "name", None) or str(exc)
             typer.echo(

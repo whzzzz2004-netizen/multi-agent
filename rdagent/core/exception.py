@@ -33,6 +33,13 @@ class CoderError(WorkflowError):
     caused_by_timeout: bool = False  # whether the error is caused by timeout
 
 
+class EnvironmentDependencyError(WorkflowError):
+    """
+    Raised when feedback indicates infrastructure failure (Docker build, pip install,
+    disk, DNS, etc.) where further LLM code evolution is unlikely to help.
+    """
+
+
 class CodeFormatError(CoderError):
     """
     The generated code is not found due format error.

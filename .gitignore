@@ -194,3 +194,8 @@ scripts/*
 # Docker image release archives should be uploaded to GitHub Releases, not Git.
 release_assets/*.tar
 release_assets/*.tar.gz
+
+# One-off desktop / assistant report generators (do not commit into this repo)
+_rdagent_report_build.py
+_rdagent_report_zip_docx.py
+*RD-Agent*复盘*
